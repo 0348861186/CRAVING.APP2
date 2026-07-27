@@ -1,1 +1,9 @@
-#
+streamlit
+numpy
+opencv-python
+Pillow
+torch
+transformers
+accelerate
+safetensors
+sentencepiece
