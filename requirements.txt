@@ -1,8 +1,6 @@
-streamlit==1.37.0
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
-Pillow==10.4.0
-easyocr==1.7.1
-mediapipe==0.10.14
-rembg==2.0.57
-onnxruntime==1.18.1
+streamlit
+numpy
+opencv-python-headless
+Pillow
+easyocr
+mediapipe
