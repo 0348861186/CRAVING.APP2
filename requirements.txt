@@ -1,8 +1,8 @@
 streamlit
 numpy
-pillow
 opencv-python-headless
+Pillow
 easyocr
 mediapipe
 rembg
-PyTorch
+onnxruntime
