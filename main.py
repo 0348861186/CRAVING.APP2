@@ -71,18 +71,31 @@ with st.sidebar:
 
 # ✅ ĐIỂM 5: Tải MiDaS ONNX Model nhẹ hơn & suy luận cực nhanh trên CPU
 import os
-import urllib.request
+import requests
 import onnxruntime as ort
 
 @st.cache_resource
 def load_midas_onnx_session():
     model_path = "midas_small.onnx"
     
-    # Danh sách các URL dự phòng (Tránh việc 1 link bị chết/404)
-    urls = [
-        "https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small-onnx.onnx",
-        "https://huggingface.co/qualcomm/MiDaS-v2-1-small/resolve/main/MiDaS-v2-1-small.onnx"
-    ]
+    # URL trực tiếp từ HuggingFace (Rất ổn định cho Server Streamlit Cloud)
+    url = "https://huggingface.co/qualcomm/MiDaS-v2-1-small/resolve/main/MiDaS-v2-1-small.onnx"
+    
+    if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
+        with st.spinner("⏳ Đang tải mô hình AI MiDaS ONNX (chỉ tải 1 lần đầu)..."):
+            try:
+                response = requests.get(url, allow_redirects=True, timeout=60)
+                response.raise_for_status() # Báo lỗi nếu link hỏng
+                with open(model_path, "wb") as f:
+                    f.write(response.content)
+            except Exception as e:
+                st.error(f"❌ Lỗi tải model: {e}")
+                st.stop()
+            
+    providers = ['CPUExecutionProvider']
+    session = ort.InferenceSession(model_path, providers=providers)
+    input_name = session.get_inputs()[0].name
+    return session, input_name
     
     if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000: # Nếu chưa có hoặc file hỏng (<1MB)
         downloaded = False
