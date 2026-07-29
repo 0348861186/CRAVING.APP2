@@ -1,19 +1,15 @@
 import streamlit as st
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 import math
-import io
-import re
 import torch
-import torch.nn as nn
 
 # -----------------------------------------------------------------------------
-# TỐI ƯU HÓA HỆ THỐNG: Khống chế CPU Threads tránh bị Streamlit Cloud Throttling
+# TỐI ƯU HÓA HỆ THỐNG
 # -----------------------------------------------------------------------------
 torch.set_num_threads(2)
 
-# Set Streamlit Page Configuration
 st.set_page_config(
     page_title="AI CNC Wood Carving Studio (GRBL / UGS)",
     page_icon="🪵",
@@ -24,40 +20,10 @@ st.set_page_config(
 # App Custom Styling
 st.markdown("""
 <style>
-    .main-title {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #5A3E2B;
-        margin-bottom: 0px;
-    }
-    .sub-title {
-        font-size: 1.0rem;
-        color: #8C6D53;
-        margin-bottom: 20px;
-    }
-    .stCard {
-        background-color: #FDFBF7;
-        padding: 15px;
-        border-radius: 8px;
-        border: 1px solid #E6DCCF;
-        margin-bottom: 15px;
-    }
-    .ai-badge {
-        background-color: #E0F2FE;
-        color: #0369A1;
-        font-weight: bold;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.85rem;
-    }
-    .warning-badge {
-        background-color: #FEF3C7;
-        color: #B45309;
-        font-weight: bold;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.85rem;
-    }
+    .main-title { font-size: 2.2rem; font-weight: 700; color: #5A3E2B; margin-bottom: 0px; }
+    .sub-title { font-size: 1.0rem; color: #8C6D53; margin-bottom: 20px; }
+    .ai-badge { background-color: #E0F2FE; color: #0369A1; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+    .warning-badge { background-color: #FEF3C7; color: #B45309; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,13 +65,10 @@ with st.sidebar:
     st.info("💡 **Ghi chú GRBL/UGS:** G-code sinh ra sử dụng hệ tọa độ tương đối/tuyệt đối chuẩn `G90`, đơn vị `G21` (mm) tương thích hoàn toàn với UGS, Candle và Mach3.")
 
 # -----------------------------------------------------------------------------
-# REAL AI PIPELINE FUNCTIONS (TỐI ƯU SIÊU TỐC CHO STREAMLIT CLOUD)
+# CACHED AI & PIPELINE FUNCTIONS
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_midas_depth_model():
-    """
-    Tải mô hình AI PyTorch MiDaS (Small version) và lưu cache bộ nhớ.
-    """
     model_type = "MiDaS_small"
     midas = torch.hub.load("intel-isl/MiDaS", model_type, trust_repo=True)
     device = torch.device("cpu")
@@ -116,26 +79,22 @@ def load_midas_depth_model():
     transform = midas_transforms.small_transform
     return midas, transform, device
 
-def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
-    """
-    TẦNG 1: AI Image Enhancement Process (Denoise - Sharpen - Contrast)
-    - Scale nhỏ ảnh lớn trước khi lọc để tránh treo CPU.
-    """
+@st.cache_data(show_spinner=False)
+def ai_stage_1_processing(img_bytes, sharpness=2.0, contrast=1.5, denoise=True):
+    image_pil = Image.open(img_bytes)
     img_work = image_pil.copy()
-    img_work.thumbnail((1024, 1024))
+    img_work.thumbnail((800, 800))  # Tối ưu size vừa đủ nét nhưng nhẹ RAM
     
     img_array = np.array(img_work.convert('RGB'))
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
-    # 1. AI Denoising
     if denoise:
-        img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 7, 7, 7, 21)
+        # Giảm hLuminance xuống 5 để tăng tốc độ xử lý OpenCV
+        img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 5, 5, 7, 21)
     
-    # 2. AI Adaptive Edge & Sharpening
     gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
     sharpened = cv2.addWeighted(img_bgr, 1.0 + (sharpness * 0.5), gaussian, -(sharpness * 0.5), 0)
     
-    # 3. Dynamic Contrast Adjustment via CLAHE
     lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
     l_channel, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=contrast * 2.0, tileGridSize=(8, 8))
@@ -145,49 +104,33 @@ def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
     
     return Image.fromarray(cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB))
 
-def ai_stage_2_depth_map(image_pil):
-    """
-    TẦNG 2: Deep Learning Depth Estimation
-    Resize tạm thời xuống max 384px giúp CPU tính toán cực nhanh (~3-5 giây).
-    """
+@st.cache_data(show_spinner=False)
+def ai_stage_2_depth_map(enhanced_pil_img):
     midas, transform, device = load_midas_depth_model()
     
-    # Scale nhỏ ảnh xuống max 384px cho PyTorch tính tốc độ cao
-    img_resized = image_pil.copy()
-    img_resized.thumbnail((384, 384))
+    img_resized = enhanced_pil_img.copy()
+    img_resized.thumbnail((256, 256))  # 256px cho phản hồi AI tức thì
     
     img_array = np.array(img_resized.convert('RGB'))
     input_batch = transform(img_array).to(device)
     
     with torch.no_grad():
         prediction = midas(input_batch)
-        # Interpolate trả về đúng kích thước ảnh hiển thị
         prediction = torch.nn.functional.interpolate(
             prediction.unsqueeze(1),
-            size=(image_pil.height, image_pil.width),
+            size=(enhanced_pil_img.height, enhanced_pil_img.width),
             mode="bicubic",
             align_corners=False,
         ).squeeze()
         
     depth_np = prediction.cpu().numpy()
-    
-    # Chuẩn hóa Heightmap 8-bit
     depth_normalized = cv2.normalize(depth_np, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     return 255 - depth_normalized
 
-def process_ai_image(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
-    enhanced_img = ai_stage_1_processing(image_pil, sharpness=sharpness, contrast=contrast, denoise=denoise)
-    depth_map = ai_stage_2_depth_map(enhanced_img)
-    return enhanced_img, depth_map
-
 # -----------------------------------------------------------------------------
-# HELPER FUNCTIONS: G-CODE GENERATOR (TỐI ƯU DUNG LƯỢNG VA SPEED)
+# HELPER FUNCTIONS: G-CODE GENERATOR (CACHED TỐI ƯU SPEED)
 # -----------------------------------------------------------------------------
-def optimize_depth_map_for_gcode(depth_map, max_dim=400):
-    """
-    Resize mảng depth map về kích thước tối ưu vừa đủ cho đường dao CNC,
-    giúp sinh G-code trong 1 giây và file nhẹ không làm đơ trình duyệt.
-    """
+def optimize_depth_map_for_gcode(depth_map, max_dim=200):
     h, w = depth_map.shape
     if max(h, w) > max_dim:
         scale = max_dim / float(max(h, w))
@@ -195,8 +138,9 @@ def optimize_depth_map_for_gcode(depth_map, max_dim=400):
         return cv2.resize(depth_map, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return depth_map
 
+@st.cache_data(show_spinner=False)
 def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, stepdown, feedrate, spindle_rpm, z_safe):
-    dmap = optimize_depth_map_for_gcode(depth_map, max_dim=300)
+    dmap = optimize_depth_map_for_gcode(depth_map, max_dim=150)
     h, w = dmap.shape
     
     lines = [
@@ -210,9 +154,8 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
     
     step_x = max(tool_dia * (stepover_pct / 100.0), 0.5)
     step_y = max(tool_dia * (stepover_pct / 100.0), 0.5)
-    
-    cols = int(stock_w / step_x)
-    rows = int(stock_h / step_y)
+    cols = max(1, int(stock_w / step_x))
+    rows = max(1, int(stock_h / step_y))
     num_passes = math.ceil(target_depth / stepdown)
     
     for current_pass in range(1, num_passes + 1):
@@ -226,7 +169,6 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
             for c in x_range:
                 x_pos = c * step_x
                 px = min(int((x_pos / stock_w) * (w - 1)), w - 1)
-                
                 normalized_depth = (dmap[py, px] / 255.0) * pass_z
                 z_pos = -normalized_depth
                 
@@ -235,35 +177,28 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
                     lines.append(f"G01 Z{z_pos:.3f} F{int(feedrate/2)}")
                 else:
                     lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
-        
         lines.append(f"G00 Z{z_safe:.3f}")
 
-    lines.extend([
-        f"G00 Z{z_safe:.3f}",
-        "M05 ; Tat truc chinh",
-        "G00 X0 Y0 ; Ve goc toa do",
-        "M30 ; Ket thuc"
-    ])
+    lines.extend(["G00 Z%.3f" % z_safe, "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
+@st.cache_data(show_spinner=False)
 def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, feedrate, spindle_rpm, z_safe):
-    dmap = optimize_depth_map_for_gcode(depth_map, max_dim=400)
+    dmap = optimize_depth_map_for_gcode(depth_map, max_dim=250)
     h, w = dmap.shape
     
     lines = [
         "(--- LAYER 2: KHAC TINH 3D / FINISHING CARVING ---)",
         "(G-code sinh cho GRBL + UGS)",
-        "G21 ; Don vi mm",
-        "G90 ; Toa do tuyet doi",
+        "G21", "G90",
         f"M03 S{int(spindle_rpm)}",
         f"G00 Z{z_safe:.3f}"
     ]
     
     step_x = max(tool_dia * (stepover_pct / 100.0), 0.2)
     step_y = max(tool_dia * (stepover_pct / 100.0), 0.2)
-    
-    cols = int(stock_w / step_x)
-    rows = int(stock_h / step_y)
+    cols = max(1, int(stock_w / step_x))
+    rows = max(1, int(stock_h / step_y))
     
     for r in range(0, rows):
         y_pos = r * step_y
@@ -281,20 +216,14 @@ def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia
             else:
                 lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
                 
-    lines.extend([
-        f"G00 Z{z_safe:.3f}",
-        "M05",
-        "G00 X0 Y0",
-        "M30"
-    ])
+    lines.extend(["G00 Z%.3f" % z_safe, "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
+@st.cache_data(show_spinner=False)
 def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown, feedrate, spindle_rpm, z_safe, tab_width, tab_height, tab_count):
     lines = [
         "(--- LAYER 3: CAT BIEN & TAO TAB / CUTOUT CONTOUR ---)",
-        "(G-code sinh cho GRBL + UGS)",
-        "G21",
-        "G90",
+        "G21", "G90",
         f"M03 S{int(spindle_rpm)}",
         f"G00 Z{z_safe:.3f}"
     ]
@@ -302,26 +231,18 @@ def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown,
     r = tool_dia / 2.0
     x0, y0 = -r, -r
     x1, y1 = stock_w + r, stock_h + r
-    
     num_passes = math.ceil(stock_thickness / stepdown)
     
     for p in range(1, num_passes + 1):
         current_z = -min(p * stepdown, stock_thickness)
         lines.append(f"(; --- Luot cat depth = {current_z:.2f} mm ---)")
-        
-        path_segments = [
-            ((x0, y0), (x1, y0)),
-            ((x1, y0), (x1, y1)),
-            ((x1, y1), (x0, y1)),
-            ((x0, y1), (x0, y0))
-        ]
+        path_segments = [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
         
         lines.append(f"G00 X{x0:.3f} Y{y0:.3f}")
         lines.append(f"G01 Z{current_z:.3f} F{int(feedrate/2)}")
         
         for p_start, p_end in path_segments:
             is_final_pass = (p == num_passes) or (abs(current_z) >= (stock_thickness - tab_height))
-            
             if is_final_pass:
                 mid_x = (p_start[0] + p_end[0]) / 2.0
                 mid_y = (p_start[1] + p_end[1]) / 2.0
@@ -335,25 +256,18 @@ def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown,
             else:
                 lines.append(f"G01 X{p_end[0]:.3f} Y{p_end[1]:.3f} F{int(feedrate)}")
                 
-    lines.extend([
-        f"G00 Z{z_safe:.3f}",
-        "M05",
-        "G00 X0 Y0",
-        "M30"
-    ])
+    lines.extend(["G00 Z%.3f" % z_safe, "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
 # -----------------------------------------------------------------------------
 # MAIN INTERFACE & WORKFLOW
 # -----------------------------------------------------------------------------
-
 tab_upload, tab_layers, tab_3d = st.tabs([
     "🖼️ 1. Upload & AI Xử Lý Ảnh",
     "🔲 2. Phân Layer Gia Công & Sinh G-Code",
     "🖥️ 3. Dashboard Mô Phỏng Trực Quan 3D Ván"
 ])
 
-# --- TAB 1: UPLOAD & AI IMAGE ENHANCEMENT ---
 with tab_upload:
     st.subheader("1. Tải Lên Ảnh Tranh Gỗ Mẫu & Xử Lý AI Siêu Nét")
     uploaded_file = st.file_uploader("Chọn ảnh bức tranh (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
@@ -370,16 +284,21 @@ with tab_upload:
             denoise_chk = st.checkbox("Khử nhiễu ảnh (Denoise)", value=True)
             
         if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh (Tốc Độ Siêu Tốc)", type="primary"):
-            with st.spinner("AI đang xử lý Tầng 1 (Nét/Tương phản) & Tầng 2 (Mô hình MiDaS 3D Depth Map)..."):
-                enhanced_img, depth_map = process_ai_image(
-                    st.session_state.original_img, 
+            with st.spinner("AI đang xử lý Tầng 1 & Tầng 2 Depth Map..."):
+                uploaded_file.seek(0)
+                bytes_data = uploaded_file.read()
+                
+                enhanced_img = ai_stage_1_processing(
+                    bytes_data, 
                     sharpness=sharp_val, 
                     contrast=contrast_val, 
                     denoise=denoise_chk
                 )
+                depth_map = ai_stage_2_depth_map(enhanced_img)
+                
                 st.session_state.processed_img = enhanced_img
                 st.session_state.depth_map = depth_map
-                st.success("Xử lý ảnh bằng AI Deep Learning hoàn tất trong vài giây!")
+                st.success("Xử lý ảnh bằng AI Deep Learning hoàn tất!")
                 
         if st.session_state.original_img is not None:
             st.markdown("---")
@@ -393,13 +312,12 @@ with tab_upload:
                 if st.session_state.processed_img is not None:
                     st.image(st.session_state.processed_img, caption="✨ Ảnh AI Tầng 1 (Enhanced & Contrast)", use_container_width=True)
                 else:
-                    st.info("Nhấn 'Kích Hoạt AI Xử Lý Ảnh' để xem kết quả siêu nét.")
+                    st.info("Nhấn 'Kích Hoạt AI Xử Lý Ảnh' để xem kết quả.")
                     
             if st.session_state.depth_map is not None:
                 st.markdown("#### 🗺️ Bản Đồ Độ Sâu 3D Thực Sự (AI Neural Network MiDaS Depth Map)")
-                st.image(st.session_state.depth_map, caption="Heightmap 3D thực tế trích xuất bởi Deep Learning MiDaS Model cho dao CNC gọt khắc", use_container_width=True)
+                st.image(st.session_state.depth_map, caption="Heightmap 3D trích xuất cho dao CNC", use_container_width=True)
 
-# --- TAB 2: LAYERS, AI ADVISOR, PARAMETERS & G-CODE GENERATION ---
 with tab_layers:
     st.subheader("2. Quản Lý Layer Gia Công & Sinh G-Code Cho GRBL / UGS")
     
@@ -408,10 +326,9 @@ with tab_layers:
     else:
         st.markdown("AI đã tự động phân tích ảnh và sinh **3 Layer Gia Công Chuẩn CNC**:")
         
-        # LAYER 1: PHA THÔ 3D (ROUGHING)
+        # LAYER 1: PHA THÔ 3D
         with st.expander("🔨 LAYER 1: PHA THÔ 3D (ROUGHING CARVING)", expanded=True):
             st.markdown('<span class="ai-badge">🤖 AI Advisor: Đề xuất sử dụng dao Endmill 6mm / Phá vạt nhanh vùng gỗ thừa.</span>', unsafe_allow_html=True)
-            st.markdown("")
             
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -430,22 +347,21 @@ with tab_layers:
                 else:
                     st.success("✅ Thông số an toàn tối ưu cho gỗ MDF/Gụ/Hương.")
             
-            gcode_l1 = generate_roughing_gcode(
-                st.session_state.depth_map, stock_w, stock_h, target_depth,
-                l1_tool_dia, l1_stepover, l1_stepdown, l1_feed, l1_rpm, z_safe
-            )
-            
-            st.download_button(
-                label="📥 Tải G-Code Layer 1 (Layer1_Roughing.nc)",
-                data=gcode_l1,
-                file_name="Layer1_Roughing.nc",
-                mime="text/plain"
-            )
+            if st.button("⚙️ Sinh G-Code Layer 1", key="btn_g1"):
+                gcode_l1 = generate_roughing_gcode(
+                    st.session_state.depth_map, stock_w, stock_h, target_depth,
+                    l1_tool_dia, l1_stepover, l1_stepdown, l1_feed, l1_rpm, z_safe
+                )
+                st.download_button(
+                    label="📥 Tải G-Code Layer 1 (Layer1_Roughing.nc)",
+                    data=gcode_l1,
+                    file_name="Layer1_Roughing.nc",
+                    mime="text/plain"
+                )
 
-        # LAYER 2: KHẮC TINH 3D (FINISHING)
+        # LAYER 2: KHẮC TINH 3D
         with st.expander("✨ LAYER 2: KHẮC TINH CHI TIẾT 3D (FINISHING CARVING)", expanded=False):
             st.markdown('<span class="ai-badge">🤖 AI Advisor: Đề xuất Dao Cầu / Tapered Ballnose 2mm R0.5 / Độ nét tinh xảo.</span>', unsafe_allow_html=True)
-            st.markdown("")
             
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -460,22 +376,21 @@ with tab_layers:
                 st.markdown("**AI Consultation Safety:**")
                 st.success("✅ Stepover 10% giúp bề mặt mịn không cần xả nhám.")
             
-            gcode_l2 = generate_finishing_gcode(
-                st.session_state.depth_map, stock_w, stock_h, target_depth,
-                l2_tool_dia, l2_stepover, l2_feed, l2_rpm, z_safe
-            )
-            
-            st.download_button(
-                label="📥 Tải G-Code Layer 2 (Layer2_Finishing.nc)",
-                data=gcode_l2,
-                file_name="Layer2_Finishing.nc",
-                mime="text/plain"
-            )
+            if st.button("⚙️ Sinh G-Code Layer 2", key="btn_g2"):
+                gcode_l2 = generate_finishing_gcode(
+                    st.session_state.depth_map, stock_w, stock_h, target_depth,
+                    l2_tool_dia, l2_stepover, l2_feed, l2_rpm, z_safe
+                )
+                st.download_button(
+                    label="📥 Tải G-Code Layer 2 (Layer2_Finishing.nc)",
+                    data=gcode_l2,
+                    file_name="Layer2_Finishing.nc",
+                    mime="text/plain"
+                )
 
-        # LAYER 3: CẮT BIÊN & CẦU GIỮ PHÔI (CUTOUT & TABS)
+        # LAYER 3: CẮT BIÊN & TẠO TAB
         with st.expander("✂️ LAYER 3: CẮT BIÊN & TẠO CẦU GIỮ PHÔI (CUTOUT & TABS)", expanded=False):
             st.markdown('<span class="ai-badge">🤖 AI Advisor: Tự động tính toán Tab cầu giữ chống văng phôi khi đứt ván.</span>', unsafe_allow_html=True)
-            st.markdown("")
             
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -491,22 +406,20 @@ with tab_layers:
                 l3_rpm = st.number_input("Tốc độ S (RPM)", value=16000, step=1000, key="l3_rpm")
                 st.info(f"Tổng độ sâu cắt biên: {board_z} mm ({math.ceil(board_z/l3_stepdown)} lượt cắt)")
             
-            gcode_l3 = generate_cutout_gcode(
-                stock_w, stock_h, board_z, l3_tool_dia, l3_stepdown,
-                l3_feed, l3_rpm, z_safe, tab_width, tab_height, tab_count
-            )
-            
-            st.download_button(
-                label="📥 Tải G-Code Layer 3 (Layer3_Cutout_Tabs.nc)",
-                data=gcode_l3,
-                file_name="Layer3_Cutout_Tabs.nc",
-                mime="text/plain"
-            )
+            if st.button("⚙️ Sinh G-Code Layer 3", key="btn_g3"):
+                gcode_l3 = generate_cutout_gcode(
+                    stock_w, stock_h, board_z, l3_tool_dia, l3_stepdown,
+                    l3_feed, l3_rpm, z_safe, tab_width, tab_height, tab_count
+                )
+                st.download_button(
+                    label="📥 Tải G-Code Layer 3 (Layer3_Cutout_Tabs.nc)",
+                    data=gcode_l3,
+                    file_name="Layer3_Cutout_Tabs.nc",
+                    mime="text/plain"
+                )
 
-# --- TAB 3: VISUAL 3D DASHBOARD ---
 with tab_3d:
     st.subheader("3. Mô Phỏng Chi Tiết Gia Công Nằm Trong Tấm Ván")
-    
     st.write(f"**Khổ ván gỗ tổng:** {board_w} x {board_h} x {board_z} mm | **Phôi gia công:** {stock_w} x {stock_h} x {target_depth} mm")
     
     scale = 0.5
@@ -526,19 +439,15 @@ with tab_3d:
             </pattern>
         </defs>
         <rect width="100%" height="100%" fill="url(#grid)" />
-        
         <rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" fill="#A0522D" stroke="#5C2C16" stroke-width="2" rx="4" opacity="0.85"/>
-        
         <circle cx="{sx}" cy="{sy}" r="6" fill="#FF0000" />
         <line x1="{sx}" y1="{sy}" x2="{sx + 30}" y2="{sy}" stroke="#FF0000" stroke-width="2" />
         <line x1="{sx}" y1="{sy}" x2="{sx}" y2="{sy + 30}" stroke="#00FF00" stroke-width="2" />
         <text x="{sx + 8}" y="{sy - 8}" fill="#000000" font-weight="bold" font-size="12">G54 (X0, Y0)</text>
-        
         <rect x="{sx + sw/2 - 10}" y="{sy - 2}" width="20" height="4" fill="#00FF00" />
         <rect x="{sx + sw/2 - 10}" y="{sy + sh - 2}" width="20" height="4" fill="#00FF00" />
         <rect x="{sx - 2}" y="{sy + sh/2 - 10}" width="4" height="20" fill="#00FF00" />
         <rect x="{sx + sw - 2}" y="{sy + sh/2 - 10}" width="4" height="20" fill="#00FF00" />
-        
         <text x="{sx + 10}" y="{sy + 25}" fill="#FFFFFF" font-size="14" font-weight="bold">Tranh Khắc CNC ({stock_w}x{stock_h}mm)</text>
         <text x="10" y="{svg_h - 10}" fill="#3D2314" font-size="12">Tấm Ván Tổng: {board_w} x {board_h} mm</text>
     </svg>
