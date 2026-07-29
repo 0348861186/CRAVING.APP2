@@ -1,6 +1,9 @@
-streamlit
-numpy
+
+
 pillow
 opencv-python-headless
 easyocr
-mediapipe
+
+streamlit>=1.37.0
+numpy>=1.26.4
+mediapipe>=0.10.14
