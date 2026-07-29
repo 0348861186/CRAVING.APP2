@@ -72,21 +72,21 @@ with st.sidebar:
     st.info("💡 **Tương thích GRBL/UGS:** G-code tự động chuẩn hóa lệnh `G21` (mm), `G90` (Toạ độ tuyệt đối), `M03/M05` (Trục chính).")
 
 # =============================================================================
-# HÀM TÍNH TOÁN OFFSET TỌA ĐỘ THEO WORK ZERO
+# HÀM TÍNH TOÁN OFFSET TỌA ĐỘ CHUẨN CNC (TÍNH TỪ VÁN THÔNG QUA WORK ZERO)
 # =============================================================================
-def get_zero_offset(work_zero_option, stock_w, stock_h):
-    """Hàm tính toán tọa độ dịch chuyển theo Work Zero được chọn"""
+def get_g54_absolute_position(work_zero_option, offset_x, offset_y, stock_w, stock_h):
+    """Tính tọa độ tuyệt đối của điểm G54 trên bàn máy/khổ ván"""
     if work_zero_option == "Góc dưới trái (Bottom Left)":
-        return 0.0, 0.0
+        return offset_x, offset_y
     elif work_zero_option == "Góc trên trái (Top Left)":
-        return 0.0, stock_h
+        return offset_x, offset_y + stock_h
     elif work_zero_option == "Góc dưới phải (Bottom Right)":
-        return stock_w, 0.0
+        return offset_x + stock_w, offset_y
     elif work_zero_option == "Góc trên phải (Top Right)":
-        return stock_w, stock_h
+        return offset_x + stock_w, offset_y + stock_h
     elif work_zero_option == "Tâm phôi (Center)":
-        return stock_w / 2.0, stock_h / 2.0
-    return 0.0, 0.0
+        return offset_x + (stock_w / 2.0), offset_y + (stock_h / 2.0)
+    return offset_x, offset_y
 
 # =============================================================================
 # THUẬT TOÁN AI XỬ LÝ ẢNH & SINH G-CODE CHUẨN GRBL/UGS
@@ -114,12 +114,14 @@ def process_ai_image(image_pil, sharpness=2.0, contrast=1.4, denoise=True):
     
     return final_img, depth_map
 
-def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, stepdown, feedrate, spindle_rpm, z_safe, work_zero):
+def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, stepdown, feedrate, spindle_rpm, z_safe, work_zero, offset_x, offset_y):
     """L1: Sinh G-code Phá Thô 3D (Roughing)"""
-    off_x, off_y = get_zero_offset(work_zero, stock_w, stock_h)
+    g54_x, g54_y = get_g54_absolute_position(work_zero, offset_x, offset_y, stock_w, stock_h)
+    
     lines = [
         "(--- LAYER 1: PHA THO 3D / ROUGHING CARVING ---)",
         f"(Work Zero Origin: {work_zero})",
+        f"(G54 Offset on Sheet: X={g54_x:.2f}mm, Y={g54_y:.2f}mm)",
         "(G-code sinh cho GRBL + UGS)",
         "G21 ; Don vi mm",
         "G90 ; Toa do tuyet doi",
@@ -136,29 +138,38 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
         pass_z = min(current_pass * stepdown, target_depth)
         lines.append(f"\n(; --- Luot pha tho depth = -{pass_z:.2f} mm ---)")
         for r in range(0, rows):
-            y_pos = (r * step_y) - off_y
-            py = min(max(int(((r * step_y) / stock_h) * (h - 1)), 0), h - 1)
+            local_y = r * step_y
+            abs_y = offset_y + local_y
+            gcode_y = abs_y - g54_y
+            
+            py = min(max(int((local_y / stock_h) * (h - 1)), 0), h - 1)
             x_range = range(0, cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+            
             for c in x_range:
-                x_pos = (c * step_x) - off_x
-                px = min(max(int(((c * step_x) / stock_w) * (w - 1)), 0), w - 1)
+                local_x = c * step_x
+                abs_x = offset_x + local_x
+                gcode_x = abs_x - g54_x
+                
+                px = min(max(int((local_x / stock_w) * (w - 1)), 0), w - 1)
                 z_pos = -((depth_map[py, px] / 255.0) * pass_z)
                 if c == x_range[0]:
-                    lines.append(f"G00 X{x_pos:.3f} Y{y_pos:.3f}")
+                    lines.append(f"G00 X{gcode_x:.3f} Y{gcode_y:.3f}")
                     lines.append(f"G01 Z{z_pos:.3f} F{int(feedrate/2)}")
                 else:
-                    lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
+                    lines.append(f"G01 X{gcode_x:.3f} Y{gcode_y:.3f} Z{z_pos:.3f} F{int(feedrate)}")
         lines.append(f"G00 Z{z_safe:.3f}")
         
     lines.extend([f"G00 Z{z_safe:.3f}", "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
-def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, feedrate, spindle_rpm, z_safe, work_zero):
+def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, feedrate, spindle_rpm, z_safe, work_zero, offset_x, offset_y):
     """L2: Sinh G-code Khắc Tinh 3D (Finishing)"""
-    off_x, off_y = get_zero_offset(work_zero, stock_w, stock_h)
+    g54_x, g54_y = get_g54_absolute_position(work_zero, offset_x, offset_y, stock_w, stock_h)
+    
     lines = [
         "(--- LAYER 2: KHAC TINH 3D / FINISHING CARVING ---)",
         f"(Work Zero Origin: {work_zero})",
+        f"(G54 Offset on Sheet: X={g54_x:.2f}mm, Y={g54_y:.2f}mm)",
         "(G-code sinh cho GRBL + UGS)",
         "G21", "G90",
         f"M03 S{int(spindle_rpm)}",
@@ -170,36 +181,52 @@ def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia
     cols, rows = int(stock_w / step_x), int(stock_h / step_y)
     
     for r in range(0, rows):
-        y_pos = (r * step_y) - off_y
-        py = min(max(int(((r * step_y) / stock_h) * (h - 1)), 0), h - 1)
+        local_y = r * step_y
+        abs_y = offset_y + local_y
+        gcode_y = abs_y - g54_y
+        
+        py = min(max(int((local_y / stock_h) * (h - 1)), 0), h - 1)
         x_range = range(0, cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+        
         for c in x_range:
-            x_pos = (c * step_x) - off_x
-            px = min(max(int(((c * step_x) / stock_w) * (w - 1)), 0), w - 1)
+            local_x = c * step_x
+            abs_x = offset_x + local_x
+            gcode_x = abs_x - g54_x
+            
+            px = min(max(int((local_x / stock_w) * (w - 1)), 0), w - 1)
             z_pos = -((depth_map[py, px] / 255.0) * target_depth)
             if c == x_range[0]:
-                lines.append(f"G00 X{x_pos:.3f} Y{y_pos:.3f}")
+                lines.append(f"G00 X{gcode_x:.3f} Y{gcode_y:.3f}")
                 lines.append(f"G01 Z{z_pos:.3f} F{int(feedrate/2)}")
             else:
-                lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
+                lines.append(f"G01 X{gcode_x:.3f} Y{gcode_y:.3f} Z{z_pos:.3f} F{int(feedrate)}")
                 
     lines.extend([f"G00 Z{z_safe:.3f}", "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
-def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown, feedrate, spindle_rpm, z_safe, tab_width, tab_height, tab_count, work_zero):
+def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown, feedrate, spindle_rpm, z_safe, tab_width, tab_height, tab_count, work_zero, offset_x, offset_y):
     """L3: Sinh G-code Cắt Biên & Tạo Cầu Giữ Phôi (Cutout & Tabs)"""
-    off_x, off_y = get_zero_offset(work_zero, stock_w, stock_h)
+    g54_x, g54_y = get_g54_absolute_position(work_zero, offset_x, offset_y, stock_w, stock_h)
+    
     lines = [
         "(--- LAYER 3: CAT BIEN & TAO TAB / CUTOUT CONTOUR ---)",
         f"(Work Zero Origin: {work_zero})",
+        f"(G54 Offset on Sheet: X={g54_x:.2f}mm, Y={g54_y:.2f}mm)",
         "(G-code sinh cho GRBL + UGS)",
         "G21", "G90",
         f"M03 S{int(spindle_rpm)}",
         f"G00 Z{z_safe:.3f}"
     ]
     r = tool_dia / 2.0
-    x0, y0 = -r - off_x, -r - off_y
-    x1, y1 = stock_w + r - off_x, stock_h + r - off_y
+    
+    # Tọa độ tuyệt đối đường cắt biên xung quanh phôi
+    abs_x0, abs_y0 = offset_x - r, offset_y - r
+    abs_x1, abs_y1 = offset_x + stock_w + r, offset_y + stock_h + r
+    
+    # Quy đổi về tọa độ tương đối so với G54
+    x0, y0 = abs_x0 - g54_x, abs_y0 - g54_y
+    x1, y1 = abs_x1 - g54_x, abs_y1 - g54_y
+    
     num_passes = math.ceil(stock_thickness / stepdown)
     
     for p in range(1, num_passes + 1):
@@ -295,7 +322,7 @@ with tab_layers:
                 else:
                     st.success("✅ Thông số an toàn.")
             
-            gcode_l1 = generate_roughing_gcode(st.session_state.depth_map, stock_w, stock_h, target_depth, l1_tool_dia, l1_stepover, l1_stepdown, l1_feed, l1_rpm, z_safe, work_zero)
+            gcode_l1 = generate_roughing_gcode(st.session_state.depth_map, stock_w, stock_h, target_depth, l1_tool_dia, l1_stepover, l1_stepdown, l1_feed, l1_rpm, z_safe, work_zero, offset_x, offset_y)
             st.download_button("📥 Tải G-Code Layer 1 (Layer1_Roughing.nc)", data=gcode_l1, file_name="Layer1_Roughing.nc", mime="text/plain")
 
         # Layer 2: Khắc Tinh
@@ -312,7 +339,7 @@ with tab_layers:
                 l2_rpm = st.number_input("Tốc độ S (RPM)", value=18000, step=1000, key="l2_r")
             with c4: st.success("✅ Stepover 10% bề mặt cực mịn.")
             
-            gcode_l2 = generate_finishing_gcode(st.session_state.depth_map, stock_w, stock_h, target_depth, l2_tool_dia, l2_stepover, l2_feed, l2_rpm, z_safe, work_zero)
+            gcode_l2 = generate_finishing_gcode(st.session_state.depth_map, stock_w, stock_h, target_depth, l2_tool_dia, l2_stepover, l2_feed, l2_rpm, z_safe, work_zero, offset_x, offset_y)
             st.download_button("📥 Tải G-Code Layer 2 (Layer2_Finishing.nc)", data=gcode_l2, file_name="Layer2_Finishing.nc", mime="text/plain")
 
         # Layer 3: Cắt Biên & Cầu Giữ Phôi
@@ -331,30 +358,34 @@ with tab_layers:
             with c4:
                 l3_rpm = st.number_input("Tốc độ S (RPM)", value=16000, step=1000, key="l3_r")
             
-            gcode_l3 = generate_cutout_gcode(stock_w, stock_h, board_z, l3_tool_dia, l3_stepdown, l3_feed, l3_rpm, z_safe, tab_width, tab_height, tab_count, work_zero)
+            gcode_l3 = generate_cutout_gcode(stock_w, stock_h, board_z, l3_tool_dia, l3_stepdown, l3_feed, l3_rpm, z_safe, tab_width, tab_height, tab_count, work_zero, offset_x, offset_y)
             st.download_button("📥 Tải G-Code Layer 3 (Layer3_Cutout_Tabs.nc)", data=gcode_l3, file_name="Layer3_Cutout_Tabs.nc", mime="text/plain")
 
 # --- TAB 3: MÔ PHỎNG VISUAL DASHBOARD 3D ---
 with tab_3d:
     st.subheader("3. Mô Phỏng Chi Tiết Gia Công Nằm Trong Tấm Ván")
-    st.write(f"Khổ ván: **{board_w}x{board_h}x{board_z} mm** | Phôi khắc: **{stock_w}x{stock_h}x{target_depth} mm** | Gốc tọa độ G54: **{work_zero}**")
+    
+    g54_x, g54_y = get_g54_absolute_position(work_zero, offset_x, offset_y, stock_w, stock_h)
+    st.write(f"Khổ ván: **{board_w}x{board_h}x{board_z} mm** | Phôi khắc: **{stock_w}x{stock_h}x{target_depth} mm** | Gốc G54 ({work_zero}): **X={g54_x:.1f}mm, Y={g54_y:.1f}mm**")
     
     scale = 0.5
     svg_w, svg_h = int(board_w * scale), int(board_h * scale)
     sx, sy, sw, sh = int(offset_x * scale), int(offset_y * scale), int(stock_w * scale), int(stock_h * scale)
     
-    # Tính tọa độ điểm đỏ chỉ Work Zero trên SVG
-    off_x, off_y = get_zero_offset(work_zero, stock_w, stock_h)
-    zx = sx + int((off_x) * scale)
-    zy = sy + int((off_y) * scale)
+    # Tọa độ hiển thị điểm G54 thực tế trên SVG
+    zx = int(g54_x * scale)
+    zy = int(g54_y * scale)
     
     svg_content = f"""
     <svg width="{svg_w}" height="{svg_h}" style="background-color: #D2B48C; border: 3px solid #8B4513; border-radius: 8px;">
+        <!-- Tấm ván tổng -->
         <rect width="100%" height="100%" fill="#D2B48C" />
+        <!-- Phôi gỗ -->
         <rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" fill="#A0522D" stroke="#5C2C16" stroke-width="2" rx="4" />
+        <!-- Điểm Work Zero (G54) -->
         <circle cx="{zx}" cy="{zy}" r="6" fill="#FF0000" />
         <line x1="{zx}" y1="{zy}" x2="{zx + 30}" y2="{zy}" stroke="#FF0000" stroke-width="2" />
-        <line x1="{zx}" y1="{zy}" x2="{zx}" y2="{zy + 30}" stroke="#00FF00" stroke-width="2" />
+        <line x1="{zx}" y1="{zy}" x2="{zx}" y2="{zx > 10 and zy - 30 or zy + 30}" stroke="#00FF00" stroke-width="2" />
         <text x="{zx + 8}" y="{zy - 8}" fill="#000000" font-weight="bold" font-size="12">G54 (X0, Y0)</text>
         <rect x="{sx + sw/2 - 10}" y="{sy - 2}" width="20" height="4" fill="#00FF00" />
         <rect x="{sx + sw/2 - 10}" y="{sy + sh - 2}" width="20" height="4" fill="#00FF00" />
