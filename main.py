@@ -4,6 +4,7 @@ import cv2
 from PIL import Image
 import math
 import torch
+import io
 
 # -----------------------------------------------------------------------------
 # TỐI ƯU HÓA HỆ THỐNG: Khống chế CPU Threads tránh bị Throttling
@@ -79,16 +80,16 @@ def load_midas_depth_model():
     transform = midas_transforms.small_transform
     return midas, transform, device
 
+# Đổi tham số thành img_np (mảng numpy) để st.cache_data tạo hash dễ dàng
 @st.cache_data(show_spinner=False)
-def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
-    img_work = image_pil.copy()
-    img_work.thumbnail((800, 800))  # Tối ưu size vừa đủ nét nhưng nhẹ RAM
+def ai_stage_1_processing(img_np, sharpness=2.0, contrast=1.5, denoise=True):
+    img_pil = Image.fromarray(img_np)
+    img_pil.thumbnail((800, 800))  # Tối ưu size vừa đủ nét nhưng nhẹ RAM
     
-    img_array = np.array(img_work.convert('RGB'))
+    img_array = np.array(img_pil.convert('RGB'))
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
     if denoise:
-        # Tối ưu tham số lọc nhiễu nhẹ CPU
         img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 5, 5, 7, 21)
     
     gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
@@ -101,12 +102,13 @@ def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
     limg = cv2.merge((cl, a, b))
     enhanced_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
     
-    return Image.fromarray(cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB))
+    return cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB) # Trả về mảng numpy RGB
 
 @st.cache_data(show_spinner=False)
-def ai_stage_2_depth_map(enhanced_pil_img):
+def ai_stage_2_depth_map(enhanced_np):
     midas, transform, device = load_midas_depth_model()
     
+    enhanced_pil_img = Image.fromarray(enhanced_np)
     img_resized = enhanced_pil_img.copy()
     img_resized.thumbnail((256, 256))  # 256px cho AI tính toán siêu tốc
     
@@ -127,7 +129,7 @@ def ai_stage_2_depth_map(enhanced_pil_img):
     return 255 - depth_normalized
 
 # -----------------------------------------------------------------------------
-# HELPER FUNCTIONS: G-CODE GENERATOR (CACHED TỐI ƯU SPEED)
+# HELPER FUNCTIONS: G-CODE GENERATOR
 # -----------------------------------------------------------------------------
 def optimize_depth_map_for_gcode(depth_map, max_dim=200):
     h, w = depth_map.shape
@@ -284,16 +286,18 @@ with tab_upload:
             
         if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh (Tốc Độ Siêu Tốc)", type="primary"):
             with st.spinner("AI đang xử lý Tầng 1 & Tầng 2 Depth Map..."):
-                # Truyền trực tiếp st.session_state.original_img (PIL Image Object)
-                enhanced_img = ai_stage_1_processing(
-                    st.session_state.original_img, 
+                # Chuyển PIL Image thành numpy.ndarray trước khi đưa vào cache function
+                img_np = np.array(st.session_state.original_img.convert('RGB'))
+                
+                enhanced_np = ai_stage_1_processing(
+                    img_np, 
                     sharpness=sharp_val, 
                     contrast=contrast_val, 
                     denoise=denoise_chk
                 )
-                depth_map = ai_stage_2_depth_map(enhanced_img)
+                depth_map = ai_stage_2_depth_map(enhanced_np)
                 
-                st.session_state.processed_img = enhanced_img
+                st.session_state.processed_img = Image.fromarray(enhanced_np)
                 st.session_state.depth_map = depth_map
                 st.success("Xử lý ảnh bằng AI Deep Learning hoàn tất!")
                 
