@@ -1,7 +1,7 @@
-streamlit
+streamlit>=1.30.0
 numpy
 opencv-python-headless
-Pillow
+pillow
 torch
 torchvision
-timm
+onnxruntime>=1.14.0
