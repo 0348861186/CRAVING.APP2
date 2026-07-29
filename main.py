@@ -70,15 +70,41 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 
 # ✅ ĐIỂM 5: Tải MiDaS ONNX Model nhẹ hơn & suy luận cực nhanh trên CPU
+import os
+import urllib.request
+import onnxruntime as ort
+
 @st.cache_resource
 def load_midas_onnx_session():
-    # Sử dụng MiDaS v2.1 Small dạng ONNX từ hub chính thức
-    model_url = "https://github.com/intel-isl/MiDaS/releases/download/v2_1/model-small-onnx.onnx"
-    # Download và cache bằng torch hub download
-    model_path = torch.hub.download_url_to_file(model_url, "midas_small.onnx", progress=False)
+    model_path = "midas_small.onnx"
     
+    # Danh sách các URL dự phòng (Tránh việc 1 link bị chết/404)
+    urls = [
+        "https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small-onnx.onnx",
+        "https://huggingface.co/qualcomm/MiDaS-v2-1-small/resolve/main/MiDaS-v2-1-small.onnx"
+    ]
+    
+    if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000: # Nếu chưa có hoặc file hỏng (<1MB)
+        downloaded = False
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req) as response, open(model_path, 'wb') as out_file:
+                    out_file.write(response.read())
+                if os.path.getsize(model_path) > 1000000:
+                    downloaded = True
+                    break
+            except Exception as e:
+                continue
+                
+        if not downloaded:
+            st.error("❌ Không thể tải model MiDaS ONNX từ các nguồn. Vui lòng kiểm tra lại kết nối mạng!")
+            st.stop()
+            
     providers = ['CPUExecutionProvider']
-    session = ort.InferenceSession("midas_small.onnx", providers=providers)
+    session = ort.InferenceSession(model_path, providers=providers)
     input_name = session.get_inputs()[0].name
     return session, input_name
 
