@@ -21,7 +21,7 @@ st.caption("Ứng dụng tạo & mô phỏng G-code đục gỗ 3D/Relief từ h
 # ==========================================
 st.sidebar.header("⚙️ Thông Số Kỹ Thuật CNC")
 
-# Thư mục kích thước phôi
+# Kích thước phôi
 st.sidebar.subheader("1. Kích Thước Phôi Gỗ (mm)")
 width = st.sidebar.number_input("Chiều rộng phôi (X)", min_value=10.0, value=400.0, step=10.0)
 height = st.sidebar.number_input("Chiều dài phôi (Y)", min_value=10.0, value=600.0, step=10.0)
@@ -29,7 +29,7 @@ thickness = st.sidebar.number_input("Độ dày phôi (Z)", min_value=1.0, value
 max_depth = st.sidebar.slider("Độ sâu đục tối đa (mm)", min_value=1.0, max_value=float(thickness), value=10.0)
 
 # ------------------------------------------
-# 🎯 MỤC MỚI: TỌA ĐỘ MỐC (WORK ZERO ORIGIN)
+# BỔ SUNG: TỌA ĐỘ MỐC (WORK ZERO ORIGIN) - DROPDOWN
 # ------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Tọa Độ Mốc (Work Zero Origin)")
@@ -55,7 +55,7 @@ z_zero_position = st.sidebar.selectbox(
     index=0
 )
 
-# Logic tính toán Offset Tọa độ mốc
+# Tính toán Offset dựa trên dropdown chọn Work Zero
 if zero_position == "Góc dưới - Bên trái (Bottom-Left)":
     offset_x, offset_y = 0.0, 0.0
 elif zero_position == "Góc dưới - Bên phải (Bottom-Right)":
@@ -67,7 +67,7 @@ elif zero_position == "Góc trên - Bên phải (Top-Right)":
 elif zero_position == "Chính giữa phôi (Center)":
     offset_x, offset_y = width / 2.0, height / 2.0
 
-# Thư mục thông số Dao & Tốc độ
+# Thông số Dao & Tốc độ
 st.sidebar.markdown("---")
 st.sidebar.subheader("2. Thông Số Dao & Tốc Độ")
 tool_diameter = st.sidebar.number_input("Đường kính mũi dao (mm)", min_value=0.1, value=3.175, step=0.1)
@@ -94,8 +94,8 @@ uploaded_file = st.file_uploader("📥 Tải lên ảnh thiết kế (JPG, PNG, 
 if uploaded_file is not None:
     col1, col2 = st.columns(2)
 
-    # Đọc và xử lý ảnh sang Grayscale Heightmap
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=uint8=np.uint8)
+    # Đọc và xử lý ảnh sang Grayscale Heightmap (Logic giữ nguyên)
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -116,12 +116,12 @@ if uploaded_file is not None:
             # Tính bước dịch dao (Stepover in mm)
             stepover = tool_diameter * (stepover_percent / 100.0)
 
-            # Resize ảnh theo kích thước mm và độ phân giải đường chạy dao
+            # Resize ảnh theo kích thước mm và độ phân giải đường chạy dao (Logic gốc)
             rows = int(height / stepover)
             cols = int(width / stepover)
             resized_gray = cv2.resize(gray, (cols, rows), interpolation=cv2.INTER_AREA)
 
-            # Hàm sinh G-Code
+            # Khởi tạo chuỗi G-Code
             gcode_lines = []
             
             # Header
@@ -135,19 +135,18 @@ if uploaded_file is not None:
             gcode_lines.append(f"M03 S{spindle_speed} (Bat truc chinh)")
             gcode_lines.append(f"G00 Z{safe_z:.3f} (Dua dao len chieu cao an toan)")
 
-            # Tạo thuật toán phay Raster (Zic-zac)
+            # Thuật toán Raster zic-zac (Logic gốc + Trừ Offset Work Zero)
             for r in range(rows):
                 y_coord = (r * stepover) - offset_y
                 
-                # Đi zic-zac để tối ưu thời gian chạy dao
+                # Đi zic-zac để tối ưu đường chạy dao
                 col_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
                 
                 for c in col_range:
                     x_coord = (c * stepover) - offset_x
                     
-                    # Tính độ sâu Z dựa vào giá trị pixel (0-255)
+                    # Tính độ sâu Z dựa vào giá trị pixel
                     pixel_val = resized_gray[r, c]
-                    # Pixel càng đen (0) -> đục càng sâu
                     depth = (1.0 - (pixel_val / 255.0)) * max_depth
                     
                     if z_zero_position == "Mặt trên phôi (Material Top)":
@@ -156,7 +155,6 @@ if uploaded_file is not None:
                         z_coord = thickness - depth
 
                     if r == 0 and c == 0:
-                        # Di chuyển tới điểm bắt đầu
                         gcode_lines.append(f"G00 X{x_coord:.3f} Y{y_coord:.3f}")
                         gcode_lines.append(f"G01 Z{z_coord:.3f} F{plunge_rate}")
                     else:
@@ -172,11 +170,10 @@ if uploaded_file is not None:
 
         st.success("✅ Đã xuất file G-code thành công!")
 
-        # Hiển thị bản xem trước G-Code & Nút tải về
+        # Xem trước & Tải về
         st.subheader("📜 Xem Trước G-Code")
         st.text_area("Mẫu G-Code phát sinh:", value="\n".join(gcode_lines[:30]) + "\n\n... (Còn tiếp) ...", height=200)
 
-        # Nút Download File G-code (.nc / .gcode)
         st.download_button(
             label="💾 Tải File G-Code (.nc)",
             data=full_gcode,
