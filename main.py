@@ -4,7 +4,6 @@ import cv2
 from PIL import Image
 import math
 import torch
-import onnxruntime as ort
 
 # -----------------------------------------------------------------------------
 # TỐI ƯU HÓA HỆ THỐNG: Khống chế CPU Threads tránh bị Throttling
@@ -66,63 +65,19 @@ with st.sidebar:
     st.info("💡 **Ghi chú GRBL/UGS:** G-code sinh ra sử dụng hệ tọa độ chuẩn `G90`, đơn vị `G21` (mm) tương thích hoàn toàn với UGS, Candle và Mach3.")
 
 # -----------------------------------------------------------------------------
-# CACHED AI & PIPELINE FUNCTIONS (TỐI ƯU HÓA 5 ĐIỂM KEY)
+# CACHED AI & PIPELINE FUNCTIONS
 # -----------------------------------------------------------------------------
 
-# ✅ ĐIỂM 5: Tải MiDaS ONNX Model nhẹ hơn & suy luận cực nhanh trên CPU
-import os
-import requests
-import onnxruntime as ort
-
-@st.cache_resource
-def load_midas_pytorch():
-    # Tải MiDaS Small chính thức qua Torch Hub
-    model_type = "MiDaS_small"
-    midas = torch.hub.load("intel-isl/MiDaS", model_type)
-    midas.eval()
-    
-    midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
-    transform = midas_transforms.small_transform
-    return midas, transform
-
+# ✅ ĐIỂM 1: Thay fastNlMeansDenoisingColored -> cv2.bilateralFilter
 @st.cache_data(show_spinner=False)
-def ai_stage_2_depth_map(enhanced_np):
-    model, transform = load_midas_pytorch()
-    
-    # Biến đổi dữ liệu đầu vào
-    input_batch = transform(enhanced_np)
-    
-    # Suy luận siêu tốc không lưu gradient tree
-    with torch.inference_mode():
-        prediction = model(input_batch)
-        prediction = torch.nn.functional.interpolate(
-            prediction.unsqueeze(1),
-            size=enhanced_np.shape[:2],
-            mode="bicubic",
-            align_corners=False,
-        ).squeeze()
-        
-    depth = prediction.cpu().numpy()
-    
-    # Giảm Depth output còn max 800px
-    h_orig, w_orig = depth.shape
-    max_side = 800
-    if max(h_orig, w_orig) > max_side:
-        scale = max_side / float(max(h_orig, w_orig))
-        out_w, out_h = int(w_orig * scale), int(h_orig * scale)
-        depth = cv2.resize(depth, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
-        
-    depth_normalized = cv2.normalize(depth, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    return 255 - depth_normalized
 def ai_stage_1_processing(img_np, sharpness=2.0, contrast=1.5, denoise=True):
     img_pil = Image.fromarray(img_np)
-    img_pil.thumbnail((800, 800)) # Khống chế kích thước phôi xử lý ảnh
+    img_pil.thumbnail((800, 800))
     
     img_array = np.array(img_pil.convert('RGB'))
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
     if denoise:
-        # Bilateral filter giúp giữ biên sắc nét nhưng khử nhiễu nhanh gấp 10 lần fastNlMeans
         img_bgr = cv2.bilateralFilter(img_bgr, d=7, sigmaColor=50, sigmaSpace=50)
     
     gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
@@ -137,53 +92,52 @@ def ai_stage_1_processing(img_np, sharpness=2.0, contrast=1.5, denoise=True):
     
     return cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
 
-# ✅ ĐIỂM 2 & 3 & 5: ONNX Runtime + torch.inference_mode + Giảm Depth max 800px
+# ✅ ĐIỂM 3 & 5: MiDaS PyTorch Hub Native + torch.inference_mode
+@st.cache_resource
+def load_midas_pytorch():
+    model_type = "MiDaS_small"
+    midas = torch.hub.load("intel-isl/MiDaS", model_type)
+    midas.eval()
+    
+    midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+    transform = midas_transforms.small_transform
+    return midas, transform
+
+# ✅ ĐIỂM 2: Khống chế Depth output còn max 800px
 @st.cache_data(show_spinner=False)
 def ai_stage_2_depth_map(enhanced_np):
-    session, input_name = load_midas_onnx_session()
+    model, transform = load_midas_pytorch()
     
-    # Chuẩn bị input 256x256 cho MiDaS Small
-    img_input = cv2.resize(enhanced_np, (256, 256), interpolation=cv2.INTER_CUBIC)
-    img_input = img_input.astype(np.float32) / 255.0
+    input_batch = transform(enhanced_np)
     
-    # Normalize theo chuẩn ImageNet
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    img_input = (img_input - mean) / std
-    img_input = np.transpose(img_input, (2, 0, 1)) # HWC -> CHW
-    img_input = np.expand_dims(img_input, axis=0)  # BCHW
-    
-    # ✅ ĐIỂM 3: Thực hiện suy luận không tạo Gradient Tree
     with torch.inference_mode():
-        outputs = session.run(None, {input_name: img_input})
-        depth = outputs[0][0]
+        prediction = model(input_batch)
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=enhanced_np.shape[:2],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
         
-    # ✅ ĐIỂM 2: Resize output về đúng tỉ lệ nhưng MAX 800px để giảm tải RAM/G-code
-    h_orig, w_orig = enhanced_np.shape[:2]
+    depth = prediction.cpu().numpy()
+    
+    h_orig, w_orig = depth.shape
     max_side = 800
     if max(h_orig, w_orig) > max_side:
         scale = max_side / float(max(h_orig, w_orig))
         out_w, out_h = int(w_orig * scale), int(h_orig * scale)
-    else:
-        out_w, out_h = w_orig, h_orig
+        depth = cv2.resize(depth, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
         
-    depth_resized = cv2.resize(depth, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
-    depth_normalized = cv2.normalize(depth_resized, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    
+    depth_normalized = cv2.normalize(depth, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     return 255 - depth_normalized
 
 # -----------------------------------------------------------------------------
-# HELPER FUNCTIONS: G-CODE GENERATOR (✅ ĐIỂM 4: ADAPTIVE SAMPLING)
+# HELPER FUNCTIONS: G-CODE GENERATOR
 # -----------------------------------------------------------------------------
 
-# ✅ ĐIỂM 4: Giảm G-code sampling adaptive tự động theo kích thước dao & bề mặt
+# ✅ ĐIỂM 4: Giảm G-code sampling adaptive tự động
 def optimize_depth_map_for_gcode(depth_map, tool_dia, max_dim=160):
-    """
-    Adaptive Downsampling: Tự động điều chỉnh kích thước lưới Heightmap dựa vào đường kính dao
-    Tránh sinh quá nhiều dòng lệnh G-code thừa khi bước dịch dao (Stepover) lớn hơn kích thước Pixel.
-    """
     h, w = depth_map.shape
-    # Dao lớn -> giảm resolution grid; Dao nhỏ -> giữ resolution chi tiết
     adaptive_max_dim = int(np.clip(max_dim * (3.0 / max(tool_dia, 1.0)), 80, max_dim))
     
     if max(h, w) > adaptive_max_dim:
@@ -194,7 +148,6 @@ def optimize_depth_map_for_gcode(depth_map, tool_dia, max_dim=160):
 
 @st.cache_data(show_spinner=False)
 def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, stepdown, feedrate, spindle_rpm, z_safe, off_x=0.0, off_y=0.0):
-    # Áp dụng Adaptive Sampling cho Pha thô (max_dim=120px là đủ mịn)
     dmap = optimize_depth_map_for_gcode(depth_map, tool_dia=tool_dia, max_dim=120)
     h, w = dmap.shape
     
@@ -241,7 +194,6 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
 
 @st.cache_data(show_spinner=False)
 def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, feedrate, spindle_rpm, z_safe, off_x=0.0, off_y=0.0):
-    # Áp dụng Adaptive Sampling cho Khắc tinh (max_dim=220px tối ưu mượt mà không bị treo UGS)
     dmap = optimize_depth_map_for_gcode(depth_map, tool_dia=tool_dia, max_dim=220)
     h, w = dmap.shape
     
@@ -342,7 +294,7 @@ tab_upload, tab_layers, tab_3d = st.tabs([
 ])
 
 with tab_upload:
-    st.subheader("1. Tải Lên Ảnh Tranh Gỗ Mẫu & Xử Lý AI Siêu Nét (ONNX Mode)")
+    st.subheader("1. Tải Lên Ảnh Tranh Gỗ Mẫu & Xử Lý AI Siêu Nét")
     uploaded_file = st.file_uploader("Chọn ảnh bức tranh (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
     
     if uploaded_file:
@@ -356,8 +308,8 @@ with tab_upload:
         with col_ctrl3:
             denoise_chk = st.checkbox("Khử nhiễu siêu tốc (Bilateral Filter)", value=True)
             
-        if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh (ONNX Speedup)", type="primary"):
-            with st.spinner("ONNX Engine đang suy luận Depth Map..."):
+        if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh", type="primary"):
+            with st.spinner("Đang suy luận Depth Map qua MiDaS PyTorch..."):
                 img_np = np.array(st.session_state.original_img.convert('RGB'))
                 
                 enhanced_np = ai_stage_1_processing(
@@ -370,7 +322,7 @@ with tab_upload:
                 
                 st.session_state.processed_img = Image.fromarray(enhanced_np)
                 st.session_state.depth_map = depth_map
-                st.success("Xử lý ảnh bằng ONNX Deep Learning hoàn tất!")
+                st.success("Xử lý ảnh bằng PyTorch Deep Learning hoàn tất!")
                 
         if st.session_state.original_img is not None:
             st.markdown("---")
@@ -387,7 +339,7 @@ with tab_upload:
                     st.info("Nhấn 'Kích Hoạt AI Xử Lý Ảnh' để xem kết quả.")
                     
             if st.session_state.depth_map is not None:
-                st.markdown("#### 🗺️ Bản Đồ Độ Sâu 3D (ONNX Heightmap max 800px)")
+                st.markdown("#### 🗺️ Bản Đồ Độ Sâu 3D (Heightmap max 800px)")
                 st.image(st.session_state.depth_map, caption="Heightmap 3D trích xuất cho dao CNC", use_container_width=True)
 
 with tab_layers:
