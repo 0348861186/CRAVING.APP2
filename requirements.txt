@@ -2,8 +2,3 @@ streamlit
 numpy
 opencv-python-headless
 Pillow
-numba
-torch
-torchvision
-transformers
-accelerate
