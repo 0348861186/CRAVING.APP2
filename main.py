@@ -6,7 +6,7 @@ import math
 import torch
 
 # -----------------------------------------------------------------------------
-# TỐI ƯU HÓA HỆ THỐNG
+# TỐI ƯU HÓA HỆ THỐNG: Khống chế CPU Threads tránh bị Throttling
 # -----------------------------------------------------------------------------
 torch.set_num_threads(2)
 
@@ -80,8 +80,7 @@ def load_midas_depth_model():
     return midas, transform, device
 
 @st.cache_data(show_spinner=False)
-def ai_stage_1_processing(img_bytes, sharpness=2.0, contrast=1.5, denoise=True):
-    image_pil = Image.open(img_bytes)
+def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
     img_work = image_pil.copy()
     img_work.thumbnail((800, 800))  # Tối ưu size vừa đủ nét nhưng nhẹ RAM
     
@@ -89,7 +88,7 @@ def ai_stage_1_processing(img_bytes, sharpness=2.0, contrast=1.5, denoise=True):
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
     if denoise:
-        # Giảm hLuminance xuống 5 để tăng tốc độ xử lý OpenCV
+        # Tối ưu tham số lọc nhiễu nhẹ CPU
         img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 5, 5, 7, 21)
     
     gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
@@ -103,32 +102,29 @@ def ai_stage_1_processing(img_bytes, sharpness=2.0, contrast=1.5, denoise=True):
     enhanced_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
     
     return Image.fromarray(cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB))
-
-import io
 
 @st.cache_data(show_spinner=False)
-def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
-    # Tạo copy để tránh sửa đổi ảnh gốc trong session
-    img_work = image_pil.copy()
-    img_work.thumbnail((800, 800))  # Tối ưu size nhẹ RAM
+def ai_stage_2_depth_map(enhanced_pil_img):
+    midas, transform, device = load_midas_depth_model()
     
-    img_array = np.array(img_work.convert('RGB'))
-    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    img_resized = enhanced_pil_img.copy()
+    img_resized.thumbnail((256, 256))  # 256px cho AI tính toán siêu tốc
     
-    if denoise:
-        img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 5, 5, 7, 21)
+    img_array = np.array(img_resized.convert('RGB'))
+    input_batch = transform(img_array).to(device)
     
-    gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
-    sharpened = cv2.addWeighted(img_bgr, 1.0 + (sharpness * 0.5), gaussian, -(sharpness * 0.5), 0)
-    
-    lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
-    l_channel, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=contrast * 2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l_channel)
-    limg = cv2.merge((cl, a, b))
-    enhanced_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-    
-    return Image.fromarray(cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB))
+    with torch.no_grad():
+        prediction = midas(input_batch)
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=(enhanced_pil_img.height, enhanced_pil_img.width),
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
+        
+    depth_np = prediction.cpu().numpy()
+    depth_normalized = cv2.normalize(depth_np, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    return 255 - depth_normalized
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS: G-CODE GENERATOR (CACHED TỐI ƯU SPEED)
@@ -182,7 +178,7 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
                     lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
         lines.append(f"G00 Z{z_safe:.3f}")
 
-    lines.extend(["G00 Z%.3f" % z_safe, "M05", "G00 X0 Y0", "M30"])
+    lines.extend([f"G00 Z{z_safe:.3f}", "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
 @st.cache_data(show_spinner=False)
@@ -219,7 +215,7 @@ def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia
             else:
                 lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
                 
-    lines.extend(["G00 Z%.3f" % z_safe, "M05", "G00 X0 Y0", "M30"])
+    lines.extend([f"G00 Z{z_safe:.3f}", "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
 @st.cache_data(show_spinner=False)
@@ -259,7 +255,7 @@ def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown,
             else:
                 lines.append(f"G01 X{p_end[0]:.3f} Y{p_end[1]:.3f} F{int(feedrate)}")
                 
-    lines.extend(["G00 Z%.3f" % z_safe, "M05", "G00 X0 Y0", "M30"])
+    lines.extend([f"G00 Z{z_safe:.3f}", "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
 # -----------------------------------------------------------------------------
@@ -288,7 +284,7 @@ with tab_upload:
             
         if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh (Tốc Độ Siêu Tốc)", type="primary"):
             with st.spinner("AI đang xử lý Tầng 1 & Tầng 2 Depth Map..."):
-                # Truyền trực tiếp st.session_state.original_img (đã là PIL Image)
+                # Truyền trực tiếp st.session_state.original_img (PIL Image Object)
                 enhanced_img = ai_stage_1_processing(
                     st.session_state.original_img, 
                     sharpness=sharp_val, 
