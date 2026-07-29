@@ -75,54 +75,45 @@ import requests
 import onnxruntime as ort
 
 @st.cache_resource
-def load_midas_onnx_session():
-    model_path = "midas_small.onnx"
+def load_midas_pytorch():
+    # Tải MiDaS Small chính thức qua Torch Hub
+    model_type = "MiDaS_small"
+    midas = torch.hub.load("intel-isl/MiDaS", model_type)
+    midas.eval()
     
-    # URL trực tiếp từ HuggingFace (Rất ổn định cho Server Streamlit Cloud)
-    url = "https://huggingface.co/qualcomm/MiDaS-v2-1-small/resolve/main/MiDaS-v2-1-small.onnx"
-    
-    if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000:
-        with st.spinner("⏳ Đang tải mô hình AI MiDaS ONNX (chỉ tải 1 lần đầu)..."):
-            try:
-                response = requests.get(url, allow_redirects=True, timeout=60)
-                response.raise_for_status() # Báo lỗi nếu link hỏng
-                with open(model_path, "wb") as f:
-                    f.write(response.content)
-            except Exception as e:
-                st.error(f"❌ Lỗi tải model: {e}")
-                st.stop()
-            
-    providers = ['CPUExecutionProvider']
-    session = ort.InferenceSession(model_path, providers=providers)
-    input_name = session.get_inputs()[0].name
-    return session, input_name
-    
-    if not os.path.exists(model_path) or os.path.getsize(model_path) < 1000000: # Nếu chưa có hoặc file hỏng (<1MB)
-        downloaded = False
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        
-        for url in urls:
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req) as response, open(model_path, 'wb') as out_file:
-                    out_file.write(response.read())
-                if os.path.getsize(model_path) > 1000000:
-                    downloaded = True
-                    break
-            except Exception as e:
-                continue
-                
-        if not downloaded:
-            st.error("❌ Không thể tải model MiDaS ONNX từ các nguồn. Vui lòng kiểm tra lại kết nối mạng!")
-            st.stop()
-            
-    providers = ['CPUExecutionProvider']
-    session = ort.InferenceSession(model_path, providers=providers)
-    input_name = session.get_inputs()[0].name
-    return session, input_name
+    midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+    transform = midas_transforms.small_transform
+    return midas, transform
 
-# ✅ ĐIỂM 1: Thay fastNlMeansDenoisingColored -> cv2.bilateralFilter
 @st.cache_data(show_spinner=False)
+def ai_stage_2_depth_map(enhanced_np):
+    model, transform = load_midas_pytorch()
+    
+    # Biến đổi dữ liệu đầu vào
+    input_batch = transform(enhanced_np)
+    
+    # Suy luận siêu tốc không lưu gradient tree
+    with torch.inference_mode():
+        prediction = model(input_batch)
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=enhanced_np.shape[:2],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
+        
+    depth = prediction.cpu().numpy()
+    
+    # Giảm Depth output còn max 800px
+    h_orig, w_orig = depth.shape
+    max_side = 800
+    if max(h_orig, w_orig) > max_side:
+        scale = max_side / float(max(h_orig, w_orig))
+        out_w, out_h = int(w_orig * scale), int(h_orig * scale)
+        depth = cv2.resize(depth, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
+        
+    depth_normalized = cv2.normalize(depth, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    return 255 - depth_normalized
 def ai_stage_1_processing(img_np, sharpness=2.0, contrast=1.5, denoise=True):
     img_pil = Image.fromarray(img_np)
     img_pil.thumbnail((800, 800)) # Khống chế kích thước phôi xử lý ảnh
