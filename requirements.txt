@@ -5,5 +5,11 @@ Pillow
 --find-links https://download.pytorch.org/whl/cpu
 torch
 torchvision
-
+opencv-python-headless
+numpy
+streamlit
+pillow
+easyocr
+mediapipe
+rembg
 
