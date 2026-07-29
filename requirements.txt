@@ -5,3 +5,4 @@ pillow
 torch
 torchvision
 onnxruntime>=1.16.0
+requests
