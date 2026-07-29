@@ -3,25 +3,28 @@ import numpy as np
 import cv2
 from PIL import Image
 import math
+import io
 
+# Set Page Config
 st.set_page_config(
-    page_title="AI CNC Wood Carving Studio (Ultra Light)",
+    page_title="AI CNC Wood Carving Studio",
     page_icon="🪵",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# App Custom Styling
+# Custom Styling
 st.markdown("""
 <style>
     .main-title { font-size: 2.2rem; font-weight: 700; color: #5A3E2B; margin-bottom: 0px; }
     .sub-title { font-size: 1.0rem; color: #8C6D53; margin-bottom: 20px; }
-    .light-badge { background-color: #DCFCE7; color: #15803D; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+    .ai-badge { background-color: #E0F2FE; color: #0369A1; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+    .warning-badge { background-color: #FEF3C7; color: #B45309; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🪵 AI CNC Wood Carving Studio <span class="light-badge">⚡ Ultra Light Engine</span></p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Hệ thống xử lý Heightmap siêu tốc & Tự động sinh G-code (GRBL / UGS)</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🪵 AI CNC Wood Carving Studio</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Hệ thống xử lý ảnh AI MiDaS 3D & Tự động sinh G-code Chuyển đổi Tranh Gỗ (Chuẩn GRBL & UGS)</p>', unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # SESSION STATE INITIALIZATION
@@ -34,7 +37,7 @@ if 'depth_map' not in st.session_state:
     st.session_state.depth_map = None
 
 # -----------------------------------------------------------------------------
-# SIDEBAR - BOARD & STOCK DIMENSIONS & WORK PIECE SETTINGS
+# SIDEBAR - BOARD & STOCK DIMENSIONS
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 1. Thông Số Phôi & Khổ Ván")
@@ -55,28 +58,38 @@ with st.sidebar:
     z_safe = st.number_input("Mặt phẳng an toàn Z-Safe (mm)", value=5.0, step=1.0, min_value=1.0)
 
 # -----------------------------------------------------------------------------
-# FAST & LIGHTWEIGHT IMAGE PIPELINE (NO PYTORCH / NO HEAVY DEEP LEARNING)
+# LAZY-LOADING OPTIMIZED AI PIPELINE (GIỮ NGUYÊN MIDAS AI)
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def fast_stage_1_processing(img_np, sharpness=1.5, contrast=1.4):
-    """Xử lý làm nét và nâng tương phản cực nhanh bằng OpenCV Pure C++"""
-    # Resize về kích thước chuẩn tối ưu cho CNC để xử lý trong vài miligiây
-    h, w = img_np.shape[:2]
-    max_dim = 600
-    if max(h, w) > max_dim:
-        scale = max_dim / float(max(h, w))
-        img_np = cv2.resize(img_np, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+@st.cache_resource
+def load_midas_model():
+    """Tải mô hình MiDaS một lần duy nhất vào bộ nhớ cache"""
+    import torch
+    torch.set_num_threads(1)  # Giới hạn 1 thread để không đơ CPU/Streamlit
+    model_type = "MiDaS_small"
+    midas = torch.hub.load("intel-isl/MiDaS", model_type, trust_repo=True)
+    device = torch.device("cpu")
+    midas.to(device)
+    midas.eval()
+    
+    midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
+    transform = midas_transforms.small_transform
+    return midas, transform, device
 
+@st.cache_data(show_spinner=False)
+def ai_stage_1_processing(img_np, sharpness=2.0, contrast=1.5, denoise=True):
+    """Tầng 1: Xử lý làm nét và tương phản OpenCV"""
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
     
-    # Unsharp Masking siêu nhẹ
-    gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 2.0)
-    sharpened = cv2.addWeighted(img_bgr, 1.0 + sharpness, gaussian, -sharpness, 0)
+    if denoise:
+        # Dùng Gaussian thay cho fastNlMeans để nhanh hơn 10 lần
+        img_bgr = cv2.GaussianBlur(img_bgr, (3, 3), 0)
     
-    # CLAHE Cân bằng độ tương phản
+    gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(img_bgr, 1.0 + (sharpness * 0.5), gaussian, -(sharpness * 0.5), 0)
+    
     lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
     l_channel, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=contrast * 1.5, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=contrast * 2.0, tileGridSize=(8, 8))
     cl = clahe.apply(l_channel)
     limg = cv2.merge((cl, a, b))
     enhanced_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
@@ -84,25 +97,35 @@ def fast_stage_1_processing(img_np, sharpness=1.5, contrast=1.4):
     return cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
 
 @st.cache_data(show_spinner=False)
-def fast_stage_2_depth_map(enhanced_np, invert=False, blur_ksize=5):
-    """Tạo Heightmap siêu tốc từ Luma & Gradient (Chạy trong 0.01 giây)"""
-    gray = cv2.cvtColor(enhanced_np, cv2.COLOR_RGB2GRAY)
+def ai_stage_2_depth_map(enhanced_np):
+    """Tầng 2: Dùng Neural Network MiDaS tính toán Depth Map 3D thực sự"""
+    import torch
+    midas, transform, device = load_midas_model()
     
-    # Làm mịn cục bộ để tránh dao CNC bị nhấp nhô quá gắt
-    if blur_ksize % 2 == 0:
-        blur_ksize += 1
-    smoothed = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0)
+    # Resize tạm để AI chạy siêu nhanh trong 1 giây
+    h_orig, w_orig = enhanced_np.shape[:2]
+    img_pil = Image.fromarray(enhanced_np)
+    img_resized = img_pil.copy()
+    img_resized.thumbnail((256, 256))
     
-    # Đảo ngược độ sâu tùy chọn (Vùng sáng nổi hay vùng tối nổi)
-    if invert:
-        depth = smoothed
-    else:
-        depth = 255 - smoothed
+    img_array = np.array(img_resized.convert('RGB'))
+    input_batch = transform(img_array).to(device)
+    
+    with torch.no_grad():
+        prediction = midas(input_batch)
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=(h_orig, w_orig),
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
         
-    return depth
+    depth_np = prediction.cpu().numpy()
+    depth_normalized = cv2.normalize(depth_np, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    return 255 - depth_normalized
 
 # -----------------------------------------------------------------------------
-# HELPER FUNCTIONS: G-CODE GENERATOR
+# HELPER FUNCTIONS: G-CODE GENERATOR (3 LAYERS)
 # -----------------------------------------------------------------------------
 def optimize_depth_map_for_gcode(depth_map, max_dim=150):
     h, w = depth_map.shape
@@ -119,8 +142,7 @@ def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia,
     
     lines = [
         "(--- LAYER 1: PHA THO 3D / ROUGHING CARVING ---)",
-        "G21 ; Don vi mm", "G90 ; Toa do tuyet doi",
-        f"M03 S{int(spindle_rpm)}", f"G00 Z{z_safe:.3f}"
+        "G21", "G90", f"M03 S{int(spindle_rpm)}", f"G00 Z{z_safe:.2f}"
     ]
     
     step_x = max(tool_dia * (stepover_pct / 100.0), 0.5)
@@ -185,16 +207,54 @@ def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia
     lines.extend([f"G00 Z{z_safe:.2f}", "M05", "G00 X0 Y0", "M30"])
     return "\n".join(lines)
 
+@st.cache_data(show_spinner=False)
+def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown, feedrate, spindle_rpm, z_safe, tab_width, tab_height, tab_count):
+    lines = [
+        "(--- LAYER 3: CAT BIEN & TAO TAB / CUTOUT CONTOUR ---)",
+        "G21", "G90", f"M03 S{int(spindle_rpm)}", f"G00 Z{z_safe:.2f}"
+    ]
+    
+    r = tool_dia / 2.0
+    x0, y0 = -r, -r
+    x1, y1 = stock_w + r, stock_h + r
+    num_passes = math.ceil(stock_thickness / stepdown)
+    
+    for p in range(1, num_passes + 1):
+        current_z = -min(p * stepdown, stock_thickness)
+        path_segments = [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
+        
+        lines.append(f"G00 X{x0:.2f} Y{y0:.2f}")
+        lines.append(f"G01 Z{current_z:.2f} F{int(feedrate/2)}")
+        
+        for p_start, p_end in path_segments:
+            is_final_pass = (p == num_passes) or (abs(current_z) >= (stock_thickness - tab_height))
+            if is_final_pass:
+                mid_x = (p_start[0] + p_end[0]) / 2.0
+                mid_y = (p_start[1] + p_end[1]) / 2.0
+                tab_z = min(current_z + tab_height, 0.0)
+                
+                lines.append(f"G01 X{mid_x - tab_width/2:.2f} Y{mid_y:.2f} Z{current_z:.2f} F{int(feedrate)}")
+                lines.append(f"G01 Z{tab_z:.2f} F{int(feedrate/2)}")
+                lines.append(f"G01 X{mid_x + tab_width/2:.2f} Y{mid_y:.2f} F{int(feedrate)}")
+                lines.append(f"G01 Z{current_z:.2f} F{int(feedrate/2)}")
+                lines.append(f"G01 X{p_end[0]:.2f} Y{p_end[1]:.2f} F{int(feedrate)}")
+            else:
+                lines.append(f"G01 X{p_end[0]:.2f} Y{p_end[1]:.2f} F{int(feedrate)}")
+                
+    lines.extend([f"G00 Z{z_safe:.2f}", "M05", "G00 X0 Y0", "M30"])
+    return "\n".join(lines)
+
 # -----------------------------------------------------------------------------
 # MAIN INTERFACE & WORKFLOW
 # -----------------------------------------------------------------------------
-tab_upload, tab_layers = st.tabs([
-    "🖼️ 1. Upload & Tạo Heightmap Siêu Tốc",
-    "🔲 2. Cấu Hình Layer & Sinh G-Code"
+tab_upload, tab_layers, tab_3d = st.tabs([
+    "🖼️ 1. Upload & AI Xử Lý Ảnh (MiDaS 3D)",
+    "🔲 2. Phân Layer Gia Công & Sinh G-Code",
+    "🖥️ 3. Dashboard Mô Phỏng Trực Quan 3D Ván"
 ])
 
 with tab_upload:
-    st.subheader("1. Tải Lên Bức Tranh & Tạo Heightmap Trong Chớp Mắt")
+    st.subheader("1. Tải Lên Ảnh Tranh Gỗ Mẫu & Xử Lý AI Depth Map 3D")
     uploaded_file = st.file_uploader("Chọn ảnh bức tranh (JPG, PNG)", type=["jpg", "jpeg", "png"])
     
     if uploaded_file:
@@ -202,39 +262,49 @@ with tab_upload:
         
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
         with col_ctrl1:
-            sharp_val = st.slider("Độ nét chi tiết (Sharpness)", 0.5, 3.0, 1.5, 0.1)
+            sharp_val = st.slider("Độ sắc nét AI (Sharpness)", 0.5, 4.0, 2.0, 0.1)
         with col_ctrl2:
             contrast_val = st.slider("Độ tương phản (Contrast)", 0.8, 2.5, 1.4, 0.1)
         with col_ctrl3:
-            invert_val = st.checkbox("Đảo ngược chiều sâu (Invert Z)", value=False)
-            blur_val = st.slider("Làm mịn mặt gỗ (Smooth)", 1, 15, 5, step=2)
+            denoise_chk = st.checkbox("Mịn bề mặt (Denoise)", value=True)
             
-        if st.button("⚡ Tạo Heightmap Ngay Lập Tức", type="primary"):
-            img_np = np.array(st.session_state.original_img.convert('RGB'))
-            enhanced_np = fast_stage_1_processing(img_np, sharpness=sharp_val, contrast=contrast_val)
-            depth_map = fast_stage_2_depth_map(enhanced_np, invert=invert_val, blur_ksize=blur_val)
-            
-            st.session_state.processed_img = Image.fromarray(enhanced_np)
-            st.session_state.depth_map = depth_map
-            st.success("Tạo Heightmap thành công trong 0.05 giây!")
+        if st.button("🚀 Kích Hoạt AI MiDaS Dựng Depth Map 3D", type="primary"):
+            with st.spinner("AI MiDaS đang trích xuất độ sâu 3D..."):
+                img_pil = st.session_state.original_img.convert('RGB')
+                img_pil.thumbnail((800, 800))
+                img_np = np.array(img_pil)
+                
+                enhanced_np = ai_stage_1_processing(img_np, sharpness=sharp_val, contrast=contrast_val, denoise=denoise_chk)
+                depth_map = ai_stage_2_depth_map(enhanced_np)
+                
+                st.session_state.processed_img = Image.fromarray(enhanced_np)
+                st.session_state.depth_map = depth_map
+                st.success("Tạo Depth Map 3D thành công!")
                 
         if st.session_state.original_img is not None:
             st.markdown("---")
             col_img1, col_img2 = st.columns(2)
             with col_img1:
-                st.image(st.session_state.original_img, caption="📷 Ảnh Gốc", use_container_width=True)
+                st.image(st.session_state.original_img, caption="📷 Ảnh Gốc Tải Lên", use_container_width=True)
             with col_img2:
-                if st.session_state.depth_map is not None:
-                    st.image(st.session_state.depth_map, caption="🗺️ Heightmap 3D (Độ sâu dao đục CNC)", use_container_width=True)
+                if st.session_state.processed_img is not None:
+                    st.image(st.session_state.processed_img, caption="✨ Ảnh AI Tầng 1 (Enhanced)", use_container_width=True)
+                else:
+                    st.info("Nhấn nút kích hoạt AI ở trên để bắt đầu xử lý.")
+                    
+            if st.session_state.depth_map is not None:
+                st.markdown("#### 🗺️ Bản Đồ Độ Sâu 3D Thực Sự (AI MiDaS Neural Network)")
+                st.image(st.session_state.depth_map, caption="Heightmap 3D trích xuất cho dao CNC đục", use_container_width=True)
 
 with tab_layers:
-    st.subheader("2. Sinh G-Code Cho GRBL / UGS")
+    st.subheader("2. Quản Lý Layer Gia Công & Sinh G-Code Cho GRBL / UGS")
     
     if st.session_state.depth_map is None:
-        st.warning("⚠️ Vui lòng tải ảnh và tạo Heightmap ở Tab 1 trước.")
+        st.warning("⚠️ Vui lòng tải ảnh và kích hoạt AI xử lý tại Tab 1 trước.")
     else:
         # LAYER 1: PHA THÔ 3D
         with st.expander("🔨 LAYER 1: PHA THÔ 3D (ROUGHING CARVING)", expanded=True):
+            st.markdown('<span class="ai-badge">🤖 AI Advisor: Dao Endmill 6mm / Phá thô gỗ nhanh.</span>', unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
             with c1:
                 l1_tool_dia = st.number_input("Đường kính dao (mm)", value=6.0, step=0.5, key="l1_dia")
@@ -254,6 +324,7 @@ with tab_layers:
 
         # LAYER 2: KHẮC TINH 3D
         with st.expander("✨ LAYER 2: KHẮC TINH CHI TIẾT 3D (FINISHING CARVING)", expanded=False):
+            st.markdown('<span class="ai-badge">🤖 AI Advisor: Dao Tapered Ballnose 2mm / Đục tinh xảo.</span>', unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
             with c1:
                 l2_tool_dia = st.number_input("Đường kính dao (mm)", value=2.0, step=0.1, key="l2_dia")
@@ -269,3 +340,45 @@ with tab_layers:
                     l2_tool_dia, l2_stepover, l2_feed, l2_rpm, z_safe
                 )
                 st.download_button("📥 Tải Layer2_Finishing.nc", data=gcode_l2, file_name="Layer2_Finishing.nc", mime="text/plain")
+
+        # LAYER 3: CẮT BIÊN & TẠO TAB
+        with st.expander("✂️ LAYER 3: CẮT BIÊN & TẠO CẦU GIỮ PHÔI (CUTOUT & TABS)", expanded=False):
+            st.markdown('<span class="ai-badge">🤖 AI Advisor: Tự động tính Tab giữ phôi chống văng khi đứt ván.</span>', unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                l3_tool_dia = st.number_input("Đường kính dao cắt (mm)", value=6.0, step=0.5, key="l3_dia")
+                l3_stepdown = st.number_input("Độ sâu cắt mỗi lượt (mm)", value=3.0, step=0.5, key="l3_sd")
+            with c2:
+                tab_width = st.number_input("Chiều rộng Tab (mm)", value=8.0, step=1.0, key="tab_w")
+                tab_height = st.number_input("Chiều cao Tab (mm)", value=4.0, step=0.5, key="tab_h")
+            with c3:
+                tab_count = st.number_input("Số lượng Tab", value=4, min_value=2, max_value=12, key="tab_c")
+                l3_feed = st.number_input("Tốc độ cắt F (mm/min)", value=1200, step=100, key="l3_feed")
+            with c4:
+                l3_rpm = st.number_input("Tốc độ S (RPM)", value=16000, step=1000, key="l3_rpm")
+            
+            if st.button("⚙️ Sinh G-Code Layer 3", key="btn_g3"):
+                gcode_l3 = generate_cutout_gcode(
+                    stock_w, stock_h, board_z, l3_tool_dia, l3_stepdown,
+                    l3_feed, l3_rpm, z_safe, tab_width, tab_height, tab_count
+                )
+                st.download_button("📥 Tải Layer3_Cutout_Tabs.nc", data=gcode_l3, file_name="Layer3_Cutout_Tabs.nc", mime="text/plain")
+
+with tab_3d:
+    st.subheader("3. Mô Phỏng Chi Tiết Gia Công Nằm Trong Tấm Ván")
+    st.write(f"**Khổ ván gỗ tổng:** {board_w} x {board_h} x {board_z} mm | **Phôi gia công:** {stock_w} x {stock_h} x {target_depth} mm")
+    
+    scale = 0.5
+    svg_w, svg_h = int(board_w * scale), int(board_h * scale)
+    sx, sy = int(offset_x * scale), int(offset_y * scale)
+    sw, sh = int(stock_w * scale), int(stock_h * scale)
+    
+    svg_content = f"""
+    <svg width="{svg_w}" height="{svg_h}" style="background-color: #D2B48C; border: 3px solid #8B4513; border-radius: 8px;">
+        <rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" fill="#A0522D" stroke="#5C2C16" stroke-width="2" opacity="0.85"/>
+        <circle cx="{sx}" cy="{sy}" r="6" fill="#FF0000" />
+        <text x="{sx + 8}" y="{sy - 8}" fill="#000000" font-weight="bold" font-size="12">G54 (X0, Y0)</text>
+        <text x="{sx + 10}" y="{sy + 25}" fill="#FFFFFF" font-size="14" font-weight="bold">Tranh Khắc CNC ({stock_w}x{stock_h}mm)</text>
+    </svg>
+    """
+    st.components.v1.html(svg_content, height=svg_h + 30)
