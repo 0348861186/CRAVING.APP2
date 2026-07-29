@@ -104,28 +104,31 @@ def ai_stage_1_processing(img_bytes, sharpness=2.0, contrast=1.5, denoise=True):
     
     return Image.fromarray(cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB))
 
+import io
+
 @st.cache_data(show_spinner=False)
-def ai_stage_2_depth_map(enhanced_pil_img):
-    midas, transform, device = load_midas_depth_model()
+def ai_stage_1_processing(image_pil, sharpness=2.0, contrast=1.5, denoise=True):
+    # Tạo copy để tránh sửa đổi ảnh gốc trong session
+    img_work = image_pil.copy()
+    img_work.thumbnail((800, 800))  # Tối ưu size nhẹ RAM
     
-    img_resized = enhanced_pil_img.copy()
-    img_resized.thumbnail((256, 256))  # 256px cho phản hồi AI tức thì
+    img_array = np.array(img_work.convert('RGB'))
+    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
-    img_array = np.array(img_resized.convert('RGB'))
-    input_batch = transform(img_array).to(device)
+    if denoise:
+        img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 5, 5, 7, 21)
     
-    with torch.no_grad():
-        prediction = midas(input_batch)
-        prediction = torch.nn.functional.interpolate(
-            prediction.unsqueeze(1),
-            size=(enhanced_pil_img.height, enhanced_pil_img.width),
-            mode="bicubic",
-            align_corners=False,
-        ).squeeze()
-        
-    depth_np = prediction.cpu().numpy()
-    depth_normalized = cv2.normalize(depth_np, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    return 255 - depth_normalized
+    gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
+    sharpened = cv2.addWeighted(img_bgr, 1.0 + (sharpness * 0.5), gaussian, -(sharpness * 0.5), 0)
+    
+    lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
+    l_channel, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=contrast * 2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l_channel)
+    limg = cv2.merge((cl, a, b))
+    enhanced_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    
+    return Image.fromarray(cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB))
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS: G-CODE GENERATOR (CACHED TỐI ƯU SPEED)
@@ -285,11 +288,9 @@ with tab_upload:
             
         if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh (Tốc Độ Siêu Tốc)", type="primary"):
             with st.spinner("AI đang xử lý Tầng 1 & Tầng 2 Depth Map..."):
-                uploaded_file.seek(0)
-                bytes_data = uploaded_file.read()
-                
+                # Truyền trực tiếp st.session_state.original_img (đã là PIL Image)
                 enhanced_img = ai_stage_1_processing(
-                    bytes_data, 
+                    st.session_state.original_img, 
                     sharpness=sharp_val, 
                     contrast=contrast_val, 
                     denoise=denoise_chk
