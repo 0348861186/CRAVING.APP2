@@ -3,6 +3,5 @@ numpy
 opencv-python-headless
 pillow
 matplotlib
-plotly
 trimesh
 scipy
