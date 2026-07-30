@@ -103,7 +103,7 @@ with st.sidebar:
 # ==============================================================================
 # GIAO DIỆN CHÍNH: TẢI ẢNH ĐỘ SÂU (DEPTH MAP)
 # ==============================================================================
-col_ui_1, col_ui_2 = st.columns([1, 1])
+col_ui_1, col_ui_2 = st.columns(2)
 
 with col_ui_1:
     st.subheader("📸 Tải lên ảnh thiết kế (Grayscale Depth Map)")
@@ -281,7 +281,7 @@ if uploaded_file is not None:
             st.session_state["gcode_layers"].items()
         ):
             with tabs[idx]:
-                col_tab_1, col_tab_2 = st.columns([1, 1])
+                col_tab_1, col_tab_2 = st.columns(2)
                 with col_tab_1:
                     st.image(
                         st.session_state["processed_images"][layer_name],
