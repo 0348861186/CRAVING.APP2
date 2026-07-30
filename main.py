@@ -5,7 +5,7 @@ import streamlit as st
 # ---------------------------------------------------------
 try:
     st.set_page_config(
-        page_title="CAM 3D Relief Generator with Gemini AI",
+        page_title="CAM 3D Relief Generator - Advanced Gemini AI",
         page_layout="wide",
         initial_sidebar_state="expanded"
     )
@@ -13,7 +13,7 @@ except Exception:
     pass
 
 # ---------------------------------------------------------
-# IMPORT THƯ VIỆN KHÁC
+# IMPORT THƯ VIỆN
 # ---------------------------------------------------------
 import numpy as np
 import cv2
@@ -21,7 +21,7 @@ from PIL import Image
 import trimesh
 import matplotlib.pyplot as plt
 
-# Tích hợp Gemini AI Thật
+# Tích hợp Gemini AI
 try:
     from google import genai
     GEMINI_AVAILABLE = True
@@ -29,10 +29,10 @@ except ImportError:
     GEMINI_AVAILABLE = False
 
 # ---------------------------------------------------------
-# HÀM BỔ TRỢ & GỌI GEMINI AI THẬT
+# HÀM BỔ TRỢ & GỌI GEMINI AI CHUYÊN SÂU
 # ---------------------------------------------------------
-def call_gemini_ai_advisor(api_key, layer_name, material, width, height, depth, tool_info, spindle, feed, stepover, stepdown=None):
-    """Hàm gọi Gemini API thật để tư vấn thông số kỹ thuật"""
+def call_gemini_ai_advisor_expert(api_key, layer_name, material, width, height, depth, tool_info, spindle, feed, stepover, stepdown=None):
+    """Hàm gọi Gemini API tư vấn sâu về Dao và Thông số CAM CNC"""
     if not api_key:
         return "⚠️ Chưa nhập Gemini API Key ở Sidebar."
     
@@ -42,15 +42,35 @@ def call_gemini_ai_advisor(api_key, layer_name, material, width, height, depth, 
     try:
         client = genai.Client(api_key=api_key)
         
+        # PROMPT CHUYÊN SÂU DÀNH CHO DÂN CAM CNC PRO
         prompt = f"""
-        Bạn là chuyên gia lập trình CAM CNC khắc tranh 3D Relief.
-        Hãy đưa ra tư vấn ngắn gọn (2-3 dòng) cho Layer: {layer_name}.
+        Bạn là một Chuyên Gia Lập Trình CAM CNC 3D Relief và Sư Phụ Vận Hành Máy Khắc Phù Điêu với 20 năm kinh nghiệm.
+        Hãy phân tích thật CHUYÊN SÂU, CHI TIẾT và KHẮC NGHIỆT cho Layer gia công sau:
 
-        - Vật liệu: {material} | Kích thước: {width}x{height}x{depth}mm
-        - Dao: {tool_info} | Spindle: {spindle} RPM | Feedrate: {feed} mm/min | Stepover: {stepover}%
-        {f"- Stepdown: {stepdown} mm" if stepdown else ""}
+        📌 THÔNG TIN ĐẦU VÀO:
+        - Lớp gia công: {layer_name}
+        - Vật liệu phôi: {material}
+        - Kích thước bức tranh: {width} x {height} mm | Độ sâu Z cực đại: {depth} mm
+        - Dao đang chọn: {tool_info}
+        - Tốc độ Trục chính (Spindle): {spindle} RPM
+        - Tốc độ Tiến dao (Feedrate): {feed} mm/min
+        - Độ dịch dao ngang (Stepover): {stepover}%
+        {f"- Độ sâu lát cắt (Stepdown): {stepdown} mm" if stepdown else "- Bước cắt sâu (Stepdown): Cắt theo biên độ 3D/Toàn bộ độ sâu"}
 
-        Yêu cầu: Đánh giá thông số trên có tối ưu chưa, cảnh báo nguy cơ gãy dao/cháy gỗ và cách khắc phục nhanh.
+        🔴 PHÂN TÍCH CHUYÊN SÂU & YÊU CẦU BẮT BUỘC TRẢ LỜI ĐỦ 3 PHẦN:
+
+        1. 🗡️ ĐÁNH GIÁ VỀ DAO GIA CÔNG (Cực kỳ quan trọng):
+           - Loại dao đang chọn ({tool_info}) đã chuẩn cho {layer_name} trên vật liệu {material} chưa?
+           - Bán kính mũi dao (R) hoặc đường kính (D) này có lấy hết được chi tiết nhỏ/nét mỏng của bức tranh không? Có nguy cơ để lại vết sọc (scallop) không?
+           - TƯ VẤN ĐỔI DAO CỤ THỂ: Nên dùng chính xác loại dao nào? (Ví dụ: Dao Cầu Nón Tapered Ballnose R0.25/R0.5/R1.0, Dao V-Bit 20°/30° mũi 0.1mm, hay Endmill Flat 2 lưỡi/3 lưỡi...). Chỉ rõ bán kính R và góc nón tối ưu nhất.
+
+        2. ⚙️ PHÂN TÍCH TỐC ĐỘ & BƯỚC CẮT (Spindle, Feedrate, Stepover, Stepdown):
+           - Tốc độ S={spindle} RPM và F={feed} mm/min có gây cháy gỗ/cháy dao hoặc làm xước bề mặt không?
+           - Stepover {stepover}% có quá to làm mịn kém hay quá nhỏ gây tốn thời gian chạy máy không?
+           - Lực tải dao (Chip load) có an toàn không? Nguy cơ gãy dao hay xơ gỗ ở đâu?
+
+        3. 🛠️ BẢNG ĐIỀU CHỈNH THÔNG SỐ TỐI ƯU GỢI Ý:
+           Đưa ra danh sách thông số chuẩn xác khuyến nghị để nhập lại vào máy (Tên dao đề xuất, Spindle RPM, Feedrate F, Stepover %, Stepdown mm).
         """
 
         response = client.models.generate_content(
@@ -134,8 +154,8 @@ def generate_layer_gcode(layer_name, x_grid, y_grid, z_grid, step_over_mm, feed_
 # ---------------------------------------------------------
 # TIÊU ĐỀ
 # ---------------------------------------------------------
-st.title("🖼️ CAM 3D Relief & Gemini AI (Tự Động 1-Click)")
-st.caption("Bấm 1 nút duy nhất để xử lý ảnh, chạy Gemini AI tư vấn tất cả Layer & Xuất G-Code")
+st.title("🖼️ CAM 3D Relief & Gemini AI Tư Vấn Dao & Thông Số Chuyên Sâu")
+st.caption("Chuyên gia Gemini AI sẽ soi kỹ từng thông số, chỉ rõ chính xác loại dao R/D/Góc và Feedrate/Spindle cho từng Layer")
 
 # ---------------------------------------------------------
 # SIDEBAR
@@ -155,7 +175,7 @@ work_zero_option = st.sidebar.selectbox(
     ["Góc Dưới Trái (Bottom-Left)", "Góc Trên Trái (Top-Left)", "Góc Dưới Phải (Bottom-Right)", "Góc Trên Phải (Top-Right)", "Tâm Phôi (Center)"]
 )
 
-material = st.sidebar.selectbox("Loại phôi:", ["Gỗ Cứng (Trắc/Hương)", "Gỗ Trung Bình (Gụ/Sồi)", "Gỗ Mềm/MDF", "Nhôm/Đồng"])
+material = st.sidebar.selectbox("Loại phôi gia công:", ["Gỗ Trắc/Hương/Cẩm (Cực Cứng)", "Gỗ Gụ/Sồi/Tần Bì (Cứng Tr.Bình)", "Gỗ Mềm/MDF", "Nhôm Dẻo/Đồng Thau", "Mica/Acrylic"])
 
 # ---------------------------------------------------------
 # MAIN INTERFACE
@@ -167,9 +187,8 @@ if uploaded_img:
     st.image(img_raw, caption="Ảnh mẫu đã chọn", width=200)
 
     st.markdown("---")
-    # DUY NHẤT 1 NÚT NÀY SẼ CHẠY TOÀN BỘ HỆ THỐNG
-    if st.button("🚀 KÍCH HOẠT TOÀN BỘ AI & XỬ LÝ G-CODE", type="primary", use_container_width=True):
-        with st.spinner("AI đang xử lý ảnh, tạo Mesh 3D, gọi Gemini tư vấn TẤT CẢ các Layer và xuất G-Code..."):
+    if st.button("🚀 KÍCH HOẠT PHÂN TÍCH CHUYÊN SÂU & XỬ LÝ G-CODE", type="primary", use_container_width=True):
+        with st.spinner("AI đang phân tích từng loại dao, lực cắt, chạy Mesh 3D và lập trình G-Code..."):
             # 1. Tiền xử lý ảnh
             img_np = np.array(img_raw)
             clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -179,32 +198,31 @@ if uploaded_img:
             # 2. Dựng Mesh 3D
             mesh, x_g, y_g, z_g = depth_map_to_mesh(final_depth, width_mm, height_mm, max_depth_mm, work_zero_option)
             
-            # 3. TỰ ĐỘNG GỌI GEMINI AI CHO TẤT CẢ 5 LAYER TRONG 1 LẦN BẤM
+            # 3. GỌI GEMINI AI CHUYÊN SÂU TƯ VẤN DAO CHO TẤT CẢ LAYER
             ai_advices = {}
             gcode_files = {}
 
-            # Thông số mặc định cho từng layer để AI đánh giá
+            # Khai báo thông số để Gemini AI soi
             layer_configs = {
-                "Layer 1: Phá Thô": {"name": "Phay Phá Thô", "tool": "Endmill Flat Ø6mm", "spindle": 18000, "feed": 3000, "so": 50, "sd": 3.0, "so_mm": 3.0},
-                "Layer 2: Bán Tinh": {"name": "Phay Bán Tinh", "tool": "Ballnose Ø4mm", "spindle": 20000, "feed": 2500, "so": 20, "sd": None, "so_mm": 0.8},
-                "Layer 3: Phay Tinh": {"name": "Phay Tinh 3D", "tool": "Tapered Ball R1mm", "spindle": 22000, "feed": 2000, "so": 8, "sd": None, "so_mm": 0.16},
-                "Layer 4: V-Bit Detail": {"name": "Khắc Chi Tiết", "tool": "V-Bit 30°", "spindle": 24000, "feed": 1500, "so": 5, "sd": None, "so_mm": 0.1},
-                "Layer 5: Cắt Biên": {"name": "Cắt Biên Profile", "tool": "Endmill Flat Ø6mm", "spindle": 18000, "feed": 2000, "so": 100, "sd": 4.0, "so_mm": 6.0}
+                "Layer 1: Phá Thô": {"name": "Phay Phá Thô (Roughing)", "tool": "Endmill Flat D6mm (Dao Phay Mặt Cắt Bằng)", "spindle": 18000, "feed": 3200, "so": 50, "sd": 3.5, "so_mm": 3.0},
+                "Layer 2: Bán Tinh": {"name": "Phay Bán Tinh (Semi-Finish)", "tool": "Ballnose D4mm (Dao Cầu Tròn D4)", "spindle": 20000, "feed": 2500, "so": 20, "sd": None, "so_mm": 0.8},
+                "Layer 3: Phay Tinh 3D": {"name": "Phay Tinh 3D (Finishing)", "tool": "Tapered Ballnose R0.5mm Góc 5° (Dao Cầu Nón)", "spindle": 22000, "feed": 2000, "so": 8, "sd": None, "so_mm": 0.08},
+                "Layer 4: Khắc V-Bit": {"name": "Khắc Chi Tiết Nét Mỏng", "tool": "Dao V-Bit Góc 30° Mũi 0.2mm", "spindle": 24000, "feed": 1400, "so": 5, "sd": None, "so_mm": 0.05},
+                "Layer 5: Cắt Biên": {"name": "Cắt Khung Biên Bức Tranh", "tool": "Endmill Flat D6mm 2 Lưỡi Thẳng", "spindle": 18000, "feed": 1800, "so": 100, "sd": 4.0, "so_mm": 6.0}
             }
 
             for l_key, cfg in layer_configs.items():
-                # Gọi AI tư vấn tự động
-                ai_advices[l_key] = call_gemini_ai_advisor(
+                # Call AI Expert
+                ai_advices[l_key] = call_gemini_ai_advisor_expert(
                     gemini_api_key, cfg["name"], material, width_mm, height_mm, max_depth_mm,
                     cfg["tool"], cfg["spindle"], cfg["feed"], cfg["so"], cfg["sd"]
                 )
-                # Tạo sẵn G-Code tự động
+                # G-Code
                 if "Cắt Biên" in cfg["name"]:
                     gcode_files[l_key] = f"(--- LAYER 5: PROFILE CUT ---\nG21\nG90\nM3 S{cfg['spindle']}\nG0 Z{safe_z}\nG0 X0 Y0\nG1 Z-{max_depth_mm} F{cfg['feed']}\nG1 X{width_mm}\nG1 Y{height_mm}\nG1 X0\nG1 Y0\nG0 Z{safe_z}\nM5\nM30"
                 else:
                     gcode_files[l_key] = generate_layer_gcode(cfg["name"], x_g, y_g, z_g, cfg["so_mm"], cfg["feed"], cfg["spindle"], safe_z, cfg["tool"])
 
-            # Lưu toàn bộ vào Session State
             st.session_state['processed'] = True
             st.session_state['mesh'] = mesh
             st.session_state['x_g'] = x_g
@@ -214,14 +232,14 @@ if uploaded_img:
             st.session_state['gcode_files'] = gcode_files
 
 # ---------------------------------------------------------
-# HIỂN THỊ KẾT QUẢ TỰ ĐỘNG
+# HIỂN THỊ KẾT QUẢ
 # ---------------------------------------------------------
 if st.session_state.get('processed', False):
-    st.success(f"✅ ĐÃ TỰ ĐỘNG XỬ LÝ XONG TOÀN BỘ LAYER & GỌI GEMINI AI! (Work Zero: {work_zero_option})")
+    st.success(f"✅ ĐÃ HOÀN TẤT PHÂN TÍCH CHUYÊN SÂU TỪ GEMINI AI! (Work Zero: {work_zero_option})")
     
     tab_view, tab_layers = st.tabs([
         "👁️ Xem Mô Hình 3D Mesh",
-        "🪓 Kết Quả AI Tư Vấn & Mã G-Code Các Layer"
+        "🪓 Đánh Giá Dao & Thông Số Chi Tiết Từ AI"
     ])
     
     with tab_view:
@@ -244,22 +262,20 @@ if st.session_state.get('processed', False):
         tab_mapping = [
             ("Layer 1: Phá Thô", layer_tabs[0], "Layer1_PhaTho.nc"),
             ("Layer 2: Bán Tinh", layer_tabs[1], "Layer2_BanTinh.nc"),
-            ("Layer 3: Phay Tinh", layer_tabs[2], "Layer3_PhayTinh.nc"),
-            ("Layer 4: V-Bit Detail", layer_tabs[3], "Layer4_KhacChiTiet.nc"),
+            ("Layer 3: Phay Tinh 3D", layer_tabs[2], "Layer3_PhayTinh.nc"),
+            ("Layer 4: Khắc V-Bit", layer_tabs[3], "Layer4_KhacChiTiet.nc"),
             ("Layer 5: Cắt Biên", layer_tabs[4], "Layer5_CatBien.nc"),
         ]
 
-        # VÀO CÁC TAB CHỈ CẦN ĐỌC TƯ VẤN VÀ TẢI FILE, KHÔNG CẦN BẤM THÊM NÚT NÀO NỮA!
         for key, tab_obj, file_name in tab_mapping:
             with tab_obj:
-                st.markdown(f"### 📌 {key}")
+                st.markdown(f"### 📌 Phân Tích Chuyên Sâu - {key}")
                 
-                # HIỂN THỊ LỜI TƯ VẤN AI TỰ ĐỘNG
-                st.write("✨ **Lời khuyên từ Gemini AI (Đã tự động phân tích):**")
-                st.info(st.session_state['ai_advices'][key])
+                # HIỂN THỊ TƯ VẤN SÂU
+                st.markdown(st.session_state['ai_advices'][key])
                 
-                # HIỂN THỊ FILE G-CODE VÀ NÚT TẢI VỀ TỰ ĐỘNG
-                st.write("💾 **Mã G-Code (Đã tự động khởi tạo):**")
+                st.markdown("---")
+                st.write("💾 **Mã G-Code Tương Ứng:**")
                 st.text_area("Xem trước mã G-Code:", st.session_state['gcode_files'][key][:300] + "\n...", height=120, key=f"txt_{key}")
                 st.download_button(
                     label=f"📥 Tải File G-Code ({file_name})",
