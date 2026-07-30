@@ -5,7 +5,7 @@ import streamlit as st
 # ---------------------------------------------------------
 try:
     st.set_page_config(
-        page_title="CAM 3D Relief Generator for CNC with Real AI",
+        page_title="CAM 3D Relief Generator with Gemini AI",
         page_layout="wide",
         initial_sidebar_state="expanded"
     )
@@ -21,26 +21,27 @@ from PIL import Image
 import trimesh
 import matplotlib.pyplot as plt
 
-# Tích hợp OpenAI làm AI thật (Bạn có thể đổi sang google.generativeai nếu muốn dùng Gemini)
+# Tích hợp Gemini AI Thật
 try:
-    import openai
-    OPENAI_AVAILABLE = True
+    from google import genai
+    GEMINI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
+    GEMINI_AVAILABLE = False
 
 # ---------------------------------------------------------
-# HÀM BỔ TRỢ & GỌI AI THẬT
+# HÀM BỔ TRỢ & GỌI GEMINI AI THẬT
 # ---------------------------------------------------------
-def call_real_ai_advisor(api_key, layer_name, material, width, height, depth, tool_info, spindle, feed, stepover, stepdown=None):
-    """Hàm gọi API OpenAI thật để tư vấn thông số kỹ thuật cho từng Layer"""
+def call_gemini_ai_advisor(api_key, layer_name, material, width, height, depth, tool_info, spindle, feed, stepover, stepdown=None):
+    """Hàm gọi Gemini API thật để tư vấn thông số kỹ thuật cho từng Layer"""
     if not api_key:
-        return "⚠️ Vui lòng nhập OpenAI API Key ở thanh bên (Sidebar) để kích hoạt AI thật tư vấn."
+        return "⚠️ Vui lòng nhập Gemini API Key ở thanh bên (Sidebar) để kích hoạt AI tư vấn."
     
-    if not OPENAI_AVAILABLE:
-        return "⚠️ Chưa cài đặt thư viện `openai`. Vui lòng chạy command: `pip install openai`"
+    if not GEMINI_AVAILABLE:
+        return "⚠️ Chưa cài đặt thư viện Google GenAI SDK. Vui lòng chạy lệnh: `pip install google-genai`"
 
     try:
-        client = openai.OpenAI(api_key=api_key)
+        # Khởi tạo Client Gemini
+        client = genai.Client(api_key=api_key)
         
         prompt = f"""
         Bạn là một chuyên gia lập trình CAM và vận hành máy CNC khắc tranh 3D Relief gỗ/kim loại nhiều năm kinh nghiệm.
@@ -56,20 +57,19 @@ def call_real_ai_advisor(api_key, layer_name, material, width, height, depth, to
         {f"- Độ sâu lát cắt (Stepdown): {stepdown} mm" if stepdown else ""}
 
         Yêu cầu:
-        1. Phân tích xem thông số (Spindle, Feedrate, Stepover, Stepdown) trên có hợp lý cho {material} hay chưa?
-        2. Cảnh báo nguy cơ (gãy dao, cháy gỗ, bề mặt thô, gồ ghề...) nếu có.
-        3. Gợi ý điều chỉnh tối ưu nhất.
+        1. Phân tích xem các thông số (Spindle, Feedrate, Stepover, Stepdown) trên đã tối ưu cho phôi {material} chưa?
+        2. Cảnh báo nguy cơ gãy dao, xơ gỗ, hay cháy bề mặt nếu có.
+        3. Gợi ý điều chỉnh ngắn gọn nhất.
         """
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini", # Hoặc gpt-4o / gpt-3.5-turbo
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=250
+        # Sử dụng mô hình gemini-2.5-flash để phản hồi nhanh chóng
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
         )
-        return response.choices[0].message.content
+        return response.text
     except Exception as e:
-        return f"❌ Lỗi khi kết nối tới AI API: {str(e)}"
+        return f"❌ Lỗi kết nối Gemini API: {str(e)}"
 
 def depth_map_to_mesh(depth_img, width_mm, height_mm, max_depth_mm, work_zero="Góc Dưới Trái (Bottom-Left)"):
     """Chuyển đổi Depth Map 2D thành Mesh 3D tính theo Gốc Tọa Độ (Work Zero) chọn trước"""
@@ -146,14 +146,18 @@ def generate_layer_gcode(layer_name, x_grid, y_grid, z_grid, step_over_mm, feed_
 # ---------------------------------------------------------
 # TIÊU ĐỀ
 # ---------------------------------------------------------
-st.title("🖼️ Hệ Thống CAM 3D Relief & AI Tư Vấn Thật Cho Máy CNC")
-st.caption("Tạo Layer độc lập, Cấu hình Work Zero, Tích hợp AI LLM tư vấn thông số & Xuất G-Code riêng")
+st.title("🖼️ CAM 3D Relief & Gemini AI Tư Vấn Thật Cho Máy CNC")
+st.caption("Giao diện chia Layer riêng, chọn Work Zero, gọi Gemini AI tư vấn & xuất G-Code độc lập")
 
 # ---------------------------------------------------------
-# SIDEBAR: CẤU HÌNH & API KEY
+# SIDEBAR: CẤU HÌNH & GEMINI API KEY
 # ---------------------------------------------------------
-st.sidebar.header("🔑 Tích Hợp AI Thật")
-api_key = st.sidebar.text_input("Nhập OpenAI API Key:", type="password", help="Nhập API Key để kích hoạt AI tư vấn trực tiếp từ LLM")
+st.sidebar.header("✨ Tích Hợp Gemini AI")
+gemini_api_key = st.sidebar.text_input(
+    "Nhập Gemini API Key:", 
+    type="password", 
+    help="Lấy API Key miễn phí từ Google AI Studio (aistudio.google.com)"
+)
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 1. Thông Số Phôi & Gốc Tọa Độ")
@@ -188,17 +192,17 @@ if uploaded_img:
     img_raw = Image.open(uploaded_img).convert("L")
     st.image(img_raw, caption="Ảnh mẫu gốc", width=250)
 
-    # NÚT KÍCH HOẠT XỬ LÝ & KÍCH HOẠT AI (YÊU CẦU 3)
+    # NÚT KÍCH HOẠT XỬ LÝ & AI
     st.markdown("---")
-    if st.button("🚀 KÍCH HOẠT AI TƯ VẤN, XỬ LÝ CÁC LAYER & TẠO G-CODE", type="primary", use_column_width=True):
-        with st.spinner("AI đang xử lý ảnh, dựng Mesh 3D, tính toán Work Zero và chuẩn bị các Layer..."):
+    if st.button("🚀 KÍCH HOẠT AI TƯ VẤN, XỬ LÝ CÁC LAYER & TẠO G-CODE", type="primary", use_container_width=True):
+        with st.spinner("Đang xử lý ảnh, tạo Mesh 3D, định vị Work Zero và khởi tạo các Layer..."):
             # 1. Tiền xử lý ảnh
             img_np = np.array(img_raw)
             clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
             enhanced_img = clahe.apply(img_np)
             final_depth = cv2.GaussianBlur(enhanced_img, (3, 3), 0)
             
-            # 2. Tạo Mesh 3D theo Work Zero đã chọn (Yêu cầu 2)
+            # 2. Tạo Mesh 3D theo Work Zero đã chọn
             mesh, x_g, y_g, z_g = depth_map_to_mesh(final_depth, width_mm, height_mm, max_depth_mm, work_zero_option)
             
             # Lưu state
@@ -210,11 +214,11 @@ if uploaded_img:
             st.session_state['z_g'] = z_g
 
 if st.session_state.get('processed', False):
-    st.success(f"✅ Đã xử lý xong! Gốc tọa độ Work Zero: **{work_zero_option}**")
+    st.success(f"✅ Đã xử lý thành công! Gốc tọa độ Work Zero chọn: **{work_zero_option}**")
     
     tab_view, tab_layers = st.tabs([
-        "👁️ Phối Cảnh Mesh 3D",
-        "🪓 Quản Lý Layer, AI Tư Vấn Thật & Xuất G-Code"
+        "👁️ Xem Phối Cảnh Mesh 3D",
+        "🪓 Lập Trình Layer, Gemini AI Tư Vấn & Xuất G-Code"
     ])
     
     with tab_view:
@@ -222,7 +226,7 @@ if st.session_state.get('processed', False):
         with col_m1:
             st.metric("Vertices", f"{len(st.session_state['mesh'].vertices):,}")
             st.metric("Faces", f"{len(st.session_state['mesh'].faces):,}")
-            st.info(f"Gốc Zero đặt tại: **{work_zero_option}**")
+            st.info(f"Work Zero đặt tại: **{work_zero_option}**")
         with col_m2:
             fig = plt.figure(figsize=(7, 4))
             ax = fig.add_subplot(111, projection='3d')
@@ -235,7 +239,7 @@ if st.session_state.get('processed', False):
             st.pyplot(fig)
 
     with tab_layers:
-        st.subheader("Cấu Hình Chi Tiết - AI Tư Vấn - Xuất G-Code Cho Mỗi Layer (Yêu Cầu 1)")
+        st.subheader("Lập Trình Từng Layer - Tư Vấn Gemini AI - Xuất G-Code Tương Ứng")
         
         layer_tabs = st.tabs([
             "Layer 1: Phá Thô (Roughing)",
@@ -260,11 +264,11 @@ if st.session_state.get('processed', False):
                 l1_stepover = st.slider("Độ dịch dao ngang (%)", 30, 70, 50, key="l1_so")
             
             with c2:
-                st.write("🤖 **AI Thật Tư Vấn Cho Layer 1:**")
-                if st.button("🧠 Hỏi AI tư vấn cho Layer 1", key="btn_ai_l1"):
-                    with st.spinner("AI đang phân tích thông số Layer 1..."):
-                        advice = call_real_ai_advisor(
-                            api_key, "Phay Phá Thô", material, width_mm, height_mm, max_depth_mm,
+                st.write("✨ **Gemini AI Tư Vấn Cho Layer 1:**")
+                if st.button("🧠 Hỏi Gemini AI tư vấn Layer 1", key="btn_ai_l1"):
+                    with st.spinner("Gemini AI đang phân tích..."):
+                        advice = call_gemini_ai_advisor(
+                            gemini_api_key, "Phay Phá Thô", material, width_mm, height_mm, max_depth_mm,
                             f"{l1_tool_type} Ø{l1_tool_dia}mm", l1_spindle, l1_feed, l1_stepover, l1_stepdown
                         )
                         st.info(advice)
@@ -273,7 +277,7 @@ if st.session_state.get('processed', False):
             if st.button("💾 Xuất Mã G-Code (Layer 1 - Phá Thô)", key="btn_gc_l1"):
                 so_mm = l1_tool_dia * (l1_stepover / 100.0)
                 gcode_l1 = generate_layer_gcode("Roughing", st.session_state['x_g'], st.session_state['y_g'], st.session_state['z_g'], so_mm, l1_feed, l1_spindle, safe_z, f"{l1_tool_type} Ø{l1_tool_dia}mm")
-                st.text_area("G-Code Layer 1 preview:", gcode_l1[:300] + "\n...", height=120)
+                st.text_area("G-Code Layer 1 xem trước:", gcode_l1[:300] + "\n...", height=120)
                 st.download_button("📥 Tải File G-Code Layer 1 (.nc)", gcode_l1, file_name="Layer1_PhaTho.nc", mime="text/plain")
 
         # ---------------------------------------------------------
@@ -290,11 +294,11 @@ if st.session_state.get('processed', False):
                 l2_stepover = st.slider("Độ dịch dao ngang (%)", 10, 30, 20, key="l2_so")
             
             with c2:
-                st.write("🤖 **AI Thật Tư Vấn Cho Layer 2:**")
-                if st.button("🧠 Hỏi AI tư vấn cho Layer 2", key="btn_ai_l2"):
-                    with st.spinner("AI đang phân tích thông số Layer 2..."):
-                        advice = call_real_ai_advisor(
-                            api_key, "Phay Bán Tinh", material, width_mm, height_mm, max_depth_mm,
+                st.write("✨ **Gemini AI Tư Vấn Cho Layer 2:**")
+                if st.button("🧠 Hỏi Gemini AI tư vấn Layer 2", key="btn_ai_l2"):
+                    with st.spinner("Gemini AI đang phân tích..."):
+                        advice = call_gemini_ai_advisor(
+                            gemini_api_key, "Phay Bán Tinh", material, width_mm, height_mm, max_depth_mm,
                             f"{l2_tool_type} Ø{l2_tool_dia}mm", l2_spindle, l2_feed, l2_stepover
                         )
                         st.info(advice)
@@ -303,7 +307,7 @@ if st.session_state.get('processed', False):
             if st.button("💾 Xuất Mã G-Code (Layer 2 - Bán Tinh)", key="btn_gc_l2"):
                 so_mm = l2_tool_dia * (l2_stepover / 100.0)
                 gcode_l2 = generate_layer_gcode("Semi-Finishing", st.session_state['x_g'], st.session_state['y_g'], st.session_state['z_g'], so_mm, l2_feed, l2_spindle, safe_z, f"{l2_tool_type} Ø{l2_tool_dia}mm")
-                st.text_area("G-Code Layer 2 preview:", gcode_l2[:300] + "\n...", height=120)
+                st.text_area("G-Code Layer 2 xem trước:", gcode_l2[:300] + "\n...", height=120)
                 st.download_button("📥 Tải File G-Code Layer 2 (.nc)", gcode_l2, file_name="Layer2_BanTinh.nc", mime="text/plain")
 
         # ---------------------------------------------------------
@@ -320,11 +324,11 @@ if st.session_state.get('processed', False):
                 l3_stepover = st.slider("Độ dịch dao ngang (%)", 5, 15, 8, key="l3_so")
             
             with c2:
-                st.write("🤖 **AI Thật Tư Vấn Cho Layer 3:**")
-                if st.button("🧠 Hỏi AI tư vấn cho Layer 3", key="btn_ai_l3"):
-                    with st.spinner("AI đang phân tích thông số Layer 3..."):
-                        advice = call_real_ai_advisor(
-                            api_key, "Phay Tinh 3D", material, width_mm, height_mm, max_depth_mm,
+                st.write("✨ **Gemini AI Tư Vấn Cho Layer 3:**")
+                if st.button("🧠 Hỏi Gemini AI tư vấn Layer 3", key="btn_ai_l3"):
+                    with st.spinner("Gemini AI đang phân tích..."):
+                        advice = call_gemini_ai_advisor(
+                            gemini_api_key, "Phay Tinh 3D", material, width_mm, height_mm, max_depth_mm,
                             f"{l3_tool_type} R{l3_tool_dia}mm", l3_spindle, l3_feed, l3_stepover
                         )
                         st.info(advice)
@@ -333,7 +337,7 @@ if st.session_state.get('processed', False):
             if st.button("💾 Xuất Mã G-Code (Layer 3 - Phay Tinh)", key="btn_gc_l3"):
                 so_mm = l3_tool_dia * (l3_stepover / 100.0)
                 gcode_l3 = generate_layer_gcode("Finishing", st.session_state['x_g'], st.session_state['y_g'], st.session_state['z_g'], so_mm, l3_feed, l3_spindle, safe_z, f"{l3_tool_type} R{l3_tool_dia}mm")
-                st.text_area("G-Code Layer 3 preview:", gcode_l3[:300] + "\n...", height=120)
+                st.text_area("G-Code Layer 3 xem trước:", gcode_l3[:300] + "\n...", height=120)
                 st.download_button("📥 Tải File G-Code Layer 3 (.nc)", gcode_l3, file_name="Layer3_PhayTinh.nc", mime="text/plain")
 
         # ---------------------------------------------------------
@@ -348,11 +352,11 @@ if st.session_state.get('processed', False):
                 l4_feed = st.number_input("Tốc độ cắt F (mm/min):", value=1500, key="l4_f")
             
             with c2:
-                st.write("🤖 **AI Thật Tư Vấn Cho Layer 4:**")
-                if st.button("🧠 Hỏi AI tư vấn cho Layer 4", key="btn_ai_l4"):
-                    with st.spinner("AI đang phân tích thông số Layer 4..."):
-                        advice = call_real_ai_advisor(
-                            api_key, "Khắc Chi Tiết V-Bit", material, width_mm, height_mm, max_depth_mm,
+                st.write("✨ **Gemini AI Tư Vấn Cho Layer 4:**")
+                if st.button("🧠 Hỏi Gemini AI tư vấn Layer 4", key="btn_ai_l4"):
+                    with st.spinner("Gemini AI đang phân tích..."):
+                        advice = call_gemini_ai_advisor(
+                            gemini_api_key, "Khắc Chi Tiết V-Bit", material, width_mm, height_mm, max_depth_mm,
                             f"Dao V-Bit {l4_angle} độ", l4_spindle, l4_feed, 5
                         )
                         st.info(advice)
@@ -360,7 +364,7 @@ if st.session_state.get('processed', False):
             st.markdown("---")
             if st.button("💾 Xuất Mã G-Code (Layer 4 - Khắc Chi Tiết)", key="btn_gc_l4"):
                 gcode_l4 = generate_layer_gcode("V-Bit Engraving", st.session_state['x_g'], st.session_state['y_g'], st.session_state['z_g'], 0.2, l4_feed, l4_spindle, safe_z, f"V-Bit {l4_angle} deg")
-                st.text_area("G-Code Layer 4 preview:", gcode_l4[:300] + "\n...", height=120)
+                st.text_area("G-Code Layer 4 xem trước:", gcode_l4[:300] + "\n...", height=120)
                 st.download_button("📥 Tải File G-Code Layer 4 (.nc)", gcode_l4, file_name="Layer4_KhacChiTiet.nc", mime="text/plain")
 
         # ---------------------------------------------------------
@@ -376,11 +380,11 @@ if st.session_state.get('processed', False):
                 l5_stepdown = st.number_input("Độ sâu cắt mỗi pass (mm):", value=4.0, key="l5_sd")
             
             with c2:
-                st.write("🤖 **AI Thật Tư Vấn Cho Layer 5:**")
-                if st.button("🧠 Hỏi AI tư vấn cho Layer 5", key="btn_ai_l5"):
-                    with st.spinner("AI đang phân tích thông số Layer 5..."):
-                        advice = call_real_ai_advisor(
-                            api_key, "Cắt Biên Profile", material, width_mm, height_mm, max_depth_mm,
+                st.write("✨ **Gemini AI Tư Vấn Cho Layer 5:**")
+                if st.button("🧠 Hỏi Gemini AI tư vấn Layer 5", key="btn_ai_l5"):
+                    with st.spinner("Gemini AI đang phân tích..."):
+                        advice = call_gemini_ai_advisor(
+                            gemini_api_key, "Cắt Biên Profile", material, width_mm, height_mm, max_depth_mm,
                             f"Endmill Ø{l5_tool_dia}mm", l5_spindle, l5_feed, 100, l5_stepdown
                         )
                         st.info(advice)
@@ -388,5 +392,5 @@ if st.session_state.get('processed', False):
             st.markdown("---")
             if st.button("💾 Xuất Mã G-Code (Layer 5 - Cắt Biên)", key="btn_gc_l5"):
                 gcode_l5 = f"(--- LAYER 5: PROFILE CUT ---\n(G54 Zero: {work_zero_option})\nG21\nG90\nM3 S{l5_spindle}\nG0 Z{safe_z}\nG0 X0 Y0\nG1 Z-{max_depth_mm} F{l5_feed}\nG1 X{width_mm}\nG1 Y{height_mm}\nG1 X0\nG1 Y0\nG0 Z{safe_z}\nM5\nM30"
-                st.text_area("G-Code Layer 5 preview:", gcode_l5, height=120)
+                st.text_area("G-Code Layer 5 xem trước:", gcode_l5, height=120)
                 st.download_button("📥 Tải File G-Code Layer 5 (.nc)", gcode_l5, file_name="Layer5_CatBien.nc", mime="text/plain")
