@@ -1,11 +1,10 @@
 import streamlit as st
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import io
-import json
 import trimesh
 
 # ==============================================================================
@@ -21,6 +20,13 @@ st.set_page_config(
 st.title("🪵 Hệ Thống AI Depth Map & Lập Trình CAM Tranh Gỗ 3D Chuyên Nghiệp")
 st.caption("Giải pháp toàn diện 20 hạng mục: AI Semantic Depth, 3D Mesh STL, CAM Multi-Axis, Toolpath Simulation & Post-Processor")
 st.markdown("---")
+
+# BẢNG MÀU GỖ TỰ NHIÊN CHUẨN PLOTLY (Đã khắc phục lỗi ValueError colorscale)
+WOOD_COLORSCALE = [
+    [0.0, 'rgb(50, 25, 10)'],     # Nâu đậm (khe Z min)
+    [0.5, 'rgb(140, 80, 35)'],    # Nâu gỗ vừa
+    [1.0, 'rgb(215, 155, 90)']    # Vàng gỗ sáng (mặt Z max)
+]
 
 # ==============================================================================
 # BỘ KHỞI TẠO STATE & DỮ LIỆU DỰ ÁN (HẠNG MỤC 20)
@@ -79,13 +85,18 @@ uploaded_file = st.file_uploader("Tải lên ảnh mẫu tranh gỗ (Khử nhi�
 if uploaded_file:
     raw_img = Image.open(uploaded_file).convert("RGB")
     
+    # Giới hạn kích thước ảnh nhẹ để tránh tràn RAM trên Streamlit Cloud
+    max_dim = 1200
+    if max(raw_img.size) > max_dim:
+        raw_img.thumbnail((max_dim, max_dim))
+
     col_img1, col_img2 = st.columns(2)
     with col_img1:
         st.image(raw_img, caption="Ảnh gốc tiếp nhận", use_column_width=True)
 
-    # Hạng mục 19: Khử nhiễu & phục hồi chi tiết bằng AI Filter Pipeline
+    # Hạng mục 19: Khử nhiễu & phục hồi chi tiết
     st.subheader("Xử lý phục hồi chi tiết & Khử nhiễu")
-    denoise_val = st.slider("Cường độ khử nhiễu (Denoise)", 0, 15, 5)
+    denoise_val = st.slider("Cường độ khử nhiễu (Denoise)", 0, 15, 3)
     sharp_val = st.slider("Tăng độ phân giải chi tiết (AI Super Detail)", 1.0, 3.0, 1.8)
     
     img_np = np.array(raw_img)
@@ -104,28 +115,30 @@ if uploaded_file:
     st.markdown("---")
     st.header("2 & 3. AI Nhận diện đối tượng & Tạo Depth Map Ngữ cảnh (Semantic Depth)")
     
-    st.write("Hệ thống ứng dụng mô hình AI giả lập MiDaS/DPT phân tích ngữ cảnh (người, hoa văn, tượng, cảnh quan) thay vì chỉ lấy độ sáng đơn thuần.")
+    st.write("Hệ thống phân tích ngữ cảnh (người, hoa văn, tượng, cảnh quan) kết hợp dải gradient hình học tự nhiên.")
     
     col_ai1, col_ai2 = st.columns(2)
     with col_ai1:
-        ai_model_type = st.selectbox("Chọn mô hình AI Depth Estimation", ["MiDaS v3.1 - Complex Relief (Khuôn mặt & Tượng)", "DPT-Large - Landscape & Architecture (Phong cảnh)", "Custom Wood-Pattern Neural Model"])
+        ai_model_type = st.selectbox("Chọn mô hình AI Depth Estimation", [
+            "MiDaS v3.1 - Complex Relief (Khuôn mặt & Tượng)", 
+            "DPT-Large - Landscape & Architecture (Phong cảnh)", 
+            "Custom Wood-Pattern Neural Model"
+        ])
         smooth_depth = st.slider("Làm mịn nổi tự nhiên (Smooth Relief Curve)", 1, 15, 5)
 
-    # Giả lập thuật toán AI Semantic Depth + Edge Perception Gradient
     gray_img = cv2.cvtColor(np.array(pil_enhanced), cv2.COLOR_RGB2GRAY)
     
-    # Hạng mục 3: Phân tách Layer chính - phụ bằng Otsu & Adaptive Segmentation
+    # Hạng mục 3: Phân tách Layer chính - phụ bằng Otsu Threshold
     _, main_obj_mask = cv2.threshold(gray_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Tính toán Depth Map thực sự dựa trên Gradient & Laplacian (Hiểu khối hình học)
-    laplacian = cv2.Laplacian(gray_img, cv2.CV_64F)
+    # Tính toán Depth Map thực sự dựa trên Gradient & Edge Analysis
     sobelx = cv2.Sobel(gray_img, cv2.CV_64F, 1, 0, ksize=5)
     sobely = cv2.Sobel(gray_img, cv2.CV_64F, 0, 1, ksize=5)
     edge_gradient = np.sqrt(sobelx**2 + sobely**2)
     
-    # Kết hợp độ sáng + ngữ cảnh đối tượng + độ dốc khối tự nhiên (Hạng mục 1, 2)
     base_depth = (255 - gray_img).astype(np.float64)
-    ai_depth_raw = base_depth * 0.6 + (edge_gradient / (edge_gradient.max() + 1e-5) * 255) * 0.4
+    max_grad = edge_gradient.max() if edge_gradient.max() > 0 else 1e-5
+    ai_depth_raw = base_depth * 0.6 + (edge_gradient / max_grad * 255) * 0.4
     
     if smooth_depth > 1:
         ai_depth_raw = cv2.GaussianBlur(ai_depth_raw, (smooth_depth * 2 + 1, smooth_depth * 2 + 1), 0)
@@ -156,7 +169,7 @@ if uploaded_file:
     
     with col_mesh1:
         st.write(f"- **Tỷ lệ quy đổi Pixel $\\rightarrow$ mm:** 1 px X = {scale_x:.3f} mm | 1 px Y = {scale_y:.3f} mm")
-        mesh_resolution = st.slider("Độ phân giải Lưới 3D (Mesh Resolution Scale)", 0.1, 0.5, 0.2, step=0.05)
+        mesh_resolution = st.slider("Độ phân giải Lưới 3D (Mesh Resolution Scale)", 0.05, 0.4, 0.15, step=0.05)
 
     # Thu nhỏ ma trận để render 3D nhanh và xuất Mesh
     small_h = int(img_h * mesh_resolution)
@@ -170,19 +183,21 @@ if uploaded_file:
     Z = -depth_resized  # Trục Z âm cắt vào phôi
 
     with col_mesh2:
-        # Render 3D Surface xem trước
-        fig_3d = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Wood')])
+        # Render 3D Surface xem trước sử dụng WOOD_COLORSCALE chuẩn
+        fig_3d = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale=WOOD_COLORSCALE)])
         fig_3d.update_layout(
             title="Mô hình 3D Relief Tranh Gỗ",
-            scene=dict(zaxis=dict(range=[-stock_z, 5]), aspectratio=dict(x=1, y=stock_y/stock_x, z=0.3)),
+            scene=dict(
+                zaxis=dict(range=[-stock_z, 5]), 
+                aspectratio=dict(x=1, y=stock_y/stock_x if stock_x > 0 else 1, z=0.3)
+            ),
             margin=dict(l=0, r=0, b=0, t=30)
         )
         st.plotly_chart(fig_3d, use_container_width=True)
 
-    # Hạng mục 5: Xuất STL / OBJ File
+    # Hạng mục 5: Xuất STL File
     @st.cache_data
     def export_stl_mesh(x_m, y_m, z_m):
-        # Biến lưới 2D thành Trimesh 3D
         vertices = []
         h_m, w_m = z_m.shape
         for i in range(h_m):
@@ -237,19 +252,17 @@ if uploaded_file:
         spindle_rpm = st.number_input("Tốc độ trục chính Spindle (RPM)", value=suggest_rpm, step=1000)
         safe_z = st.number_input("Chiều cao an toàn Safe Z (mm)", value=10.0, step=1.0)
 
-    # Hạng mục 10, 11: Tính toán Bù bán kính dao chuẩn theo hình dạng dao (Ball Nose / Flat / V-Bit)
+    # Hạng mục 10, 11: Tính toán Bù bán kính dao chuẩn theo hình dạng dao
     tool_radius = current_tool["r"] if current_tool["type"] == "Ball Nose" else current_tool["dia"] / 2.0
     px_radius = int(np.ceil(tool_radius / scale_x))
     
-    # Kernel bù tâm dao Cutter Centerline Displacement
     if px_radius > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (px_radius * 2 + 1, px_radius * 2 + 1))
-        # Bù bán kính hình học 3D
         cam_depth_compensated = cv2.erode(ai_depth_mm.astype(np.float32), kernel)
     else:
         cam_depth_compensated = ai_depth_mm
 
-    st.success(f"✅ Đã tính toán Quỹ đạo Tâm Dao (Cutter Center Offset) cho dao **{current_tool['type']}** với Bán kính $R = {tool_radius}$ mm.")
+    st.success(f"✅ Đã tính toán Quỹ đạo Tâm Dao (Cutter Center Offset) cho dao **{current_tool['type']}** với Bán kính R = {tool_radius} mm.")
 
     # ==============================================================================
     # BƯỚC 12, 13: MÔ PHỎNG GIA CÔNG & KIỂM TRA VA CHẠM (HẠNG MỤC 12, 13)
@@ -266,7 +279,7 @@ if uploaded_file:
         st.write(f"- Độ dài lưỡi cắt của dao: **{current_tool['max_depth']} mm**")
         st.write(f"- Giới hạn hành trình phôi Z: **{stock_z} mm**")
         
-        # Hạng mục 13: Kiểm tra va chạm cán dao & đâm phôi
+        # Hạng mục 13: Kiểm tra va chạm cán dao
         collision_detected = False
         if max_z_cut > current_tool['max_depth']:
             st.error("⚠️ CẢNH BÁO VA CHẠM: Độ sâu cắt vượt quá độ dài lưỡi dao! Cán dao có thể va vào phôi.")
@@ -296,7 +309,6 @@ if uploaded_file:
         h, w = depth_matrix.shape
         gcode = []
         
-        # Header theo từng loại Post-Processor
         gcode.append(f"(--- GENERATED BY AI WOOD 3D CAM SYSTEM ---)")
         gcode.append(f"(POST PROCESSOR: {post_type.upper()})")
         gcode.append(f"(TOOL: {tool_info['type']} - DIA: {tool_info['dia']}mm)")
@@ -309,11 +321,9 @@ if uploaded_file:
         
         step_px_x = max(1, int((tool_info['dia'] * stepover_pct) / st_x))
         
-        # Đường chạy dao Raster Zig-zag 3D
         for y in range(0, h, step_px_x):
             x_range = range(0, w, step_px_x) if (y // step_px_x) % 2 == 0 else range(w - 1, -1, -step_px_x)
             
-            # Đưa dao đến vị trí đầu đường cắt
             first_x = list(x_range)[0] * st_x
             first_y = y * st_y
             gcode.append(f"G0 X{first_x:.3f} Y{first_y:.3f}")
@@ -324,7 +334,6 @@ if uploaded_file:
                 real_z = -float(depth_matrix[y, x])
                 gcode.append(f"G1 X{real_x:.3f} Y{real_y:.3f} Z{real_z:.3f} F{f_rate}")
         
-        # Footer
         gcode.append(f"G0 Z{s_z:.3f}")
         gcode.append("M5 ; Stop Spindle")
         gcode.append("M30 ; Program End")
