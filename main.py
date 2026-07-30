@@ -1,8 +1,7 @@
 import streamlit as st
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance
-import matplotlib.pyplot as plt
+from PIL import Image
 import io
 import zipfile
 
@@ -16,17 +15,17 @@ st.set_page_config(
 )
 
 st.title("🪵 Hệ Thống AI CAM Tranh Gỗ 3D Phân Lớp (Chuẩn GRBL / UGS)")
-st.caption("Tích hợp AI Tư vấn Thông số, Work Zero linh hoạt, Tự động Phân lớp & Layer Cắt Biên Tách Sản Phẩm")
+st.caption("Tích hợp nút AI Tính Toán Thông Số, Work Zero linh hoạt & Layer Cắt Biên Tách Sản Phẩm")
 st.markdown("---")
 
 # ==============================================================================
-# SIDEBAR: CẤU HÌNH PHÔI, WORK ZERO VÀ AI TƯ VẤN
+# SIDEBAR: CẤU HÌNH PHÔI & CHỌN LOẠI GỖ
 # ==============================================================================
 with st.sidebar:
     st.header("📂 1. Kích Thước Phôi & Work Zero")
     stock_x = st.number_input("Chiều dài phôi X (mm)", value=300.0, step=10.0)
     stock_y = st.number_input("Chiều rộng phôi Y (mm)", value=200.0, step=10.0)
-    stock_z = st.number_input("Độ dày phôi Z (mm)", value=30.0, step=5.0)
+    stock_z = st.number_input("Chiều dày phôi Z (mm)", value=30.0, step=5.0)
     relief_depth = st.number_input("Độ sâu tranh 3D Z (mm)", value=15.0, step=1.0)
     safe_z = st.number_input("Chiều cao an toàn Safe Z (mm)", value=10.0, step=1.0)
     
@@ -58,24 +57,23 @@ with st.sidebar:
     st.info("🤖 **Bộ điều khiển:** Chuẩn **GRBL / UGS (Universal Gcode Sender)**")
 
 # ==============================================================================
-# BỘ TƯ VẤN THÔNG SỐ GIA CÔNG THÔNG MINH (AI ADVISOR)
+# BỘ TƯ VẤN THÔNG SỐ GIA CÔNG (AI ENGINE)
 # ==============================================================================
-def get_ai_cam_recommendation(wood, depth, width):
-    """Hàm AI tự động tính toán thông số dao & tốc độ tối ưu dựa trên gỗ và kích thước phôi"""
+def calculate_ai_parameters(wood, depth, width, height, thickness):
+    """Hàm thuật toán AI tính toán các thông số dao, tốc độ và đường cắt tối ưu"""
     if "Trắc" in wood:
         f_rough, f_finish, f_pencil, f_cutout = 1200, 1800, 1000, 800
         rpm_rough, rpm_finish, rpm_pencil, rpm_cutout = 18000, 22000, 20000, 16000
-        stepdown_r, stepdown_cut = 2.0, 2.5
+        stepdown_r, stepdown_cut = 2.0, 2.0
     elif "Gụ" in wood:
         f_rough, f_finish, f_pencil, f_cutout = 1800, 2400, 1200, 1200
         rpm_rough, rpm_finish, rpm_pencil, rpm_cutout = 16000, 20000, 18000, 15000
-        stepdown_r, stepdown_cut = 3.0, 3.5
-    else: # Gỗ mềm
+        stepdown_r, stepdown_cut = 3.0, 3.0
+    else:  # Gỗ mềm
         f_rough, f_finish, f_pencil, f_cutout = 2500, 3000, 1500, 1500
         rpm_rough, rpm_finish, rpm_pencil, rpm_cutout = 14000, 18000, 16000, 14000
         stepdown_r, stepdown_cut = 4.0, 4.0
 
-    # Khai báo cấu hình dao gợi ý
     d_rough = 6.0 if width >= 200 else 4.0
     d_finish = 3.0 if width >= 200 else 2.0
     d_pencil = 1.0
@@ -88,47 +86,59 @@ def get_ai_cam_recommendation(wood, depth, width):
         "l4": {"tool": f"End Mill Cắt Biên Ø{d_cutout}mm", "dia": d_cutout, "f": f_cutout, "s": rpm_cutout, "stepdown": stepdown_cut}
     }
 
-ai_rec = get_ai_cam_recommendation(wood_type, relief_depth, stock_x)
-
 # ==============================================================================
-# HIỂN THỊ VÙNG TƯ VẤN AI TRÊN DASHBOARD
+# VÙNG NÚT BẤM "TÍNH TOÁN" VÀ HIỂN THỊ KẾT QUẢ TƯ VẤN AI
 # ==============================================================================
-st.header("🤖 Trợ Lý AI: Tư Vấn Thông Số Gia Công Tối Ưu")
+st.header("🤖 Trợ Lý AI: Tính Toán Thông Số Gia Công")
 
+col_btn, col_space = st.columns([1, 3])
+with col_btn:
+    # NÚT BẤM TÍNH TOÁN THEO YÊU CẦU
+    calc_pressed = st.button("🧮 TÍNH TOÁN THÔNG SỐ AI", use_container_width=True, type="primary")
+
+# Khởi tạo hoặc cập nhật kết quả AI tính toán vào Session State
+if calc_pressed or "ai_rec" not in st.session_state:
+    st.session_state["ai_rec"] = calculate_ai_parameters(wood_type, relief_depth, stock_x, stock_y, stock_z)
+    if calc_pressed:
+        st.toast("✅ Đã tính toán xong thông số gia công tối ưu!", icon="🎉")
+
+ai_rec = st.session_state["ai_rec"]
+
+# HIỂN THỊ BẢNG THÔNG SỐ SAU KHỊ BẤM TÍNH TOÁN
 col_ai1, col_ai2, col_ai3, col_ai4 = st.columns(4)
 
 with col_ai1:
     st.success("🔴 **Layer 1: Phá Thô**")
     st.write(f"- Dao gợi ý: **{ai_rec['l1']['tool']}**")
     st.write(f"- Tốc độ ăn (F): **{ai_rec['l1']['f']} mm/min**")
-    st.write(f"- Tốc độ Spindle (S): **{ai_rec['l1']['s']} RPM**")
-    st.write(f"- Chiều sâu Stepdown: **{ai_rec['l1']['stepdown']} mm**")
+    st.write(f"- Spindle (S): **{ai_rec['l1']['s']} RPM**")
+    st.write(f"- Lát cắt Z (Stepdown): **{ai_rec['l1']['stepdown']} mm**")
 
 with col_ai2:
     st.info("🟢 **Layer 2: Chạy Tinh**")
     st.write(f"- Dao gợi ý: **{ai_rec['l2']['tool']}**")
     st.write(f"- Tốc độ ăn (F): **{ai_rec['l2']['f']} mm/min**")
-    st.write(f"- Tốc độ Spindle (S): **{ai_rec['l2']['s']} RPM**")
-    st.write(f"- Stepover: **12% bán kính dao**")
+    st.write(f"- Spindle (S): **{ai_rec['l2']['s']} RPM**")
+    st.write(f"- Dịch dao Stepover: **12% bán kính**")
 
 with col_ai3:
     st.warning("🔵 **Layer 3: Điêu Khắc Nét**")
     st.write(f"- Dao gợi ý: **{ai_rec['l3']['tool']}**")
     st.write(f"- Tốc độ ăn (F): **{ai_rec['l3']['f']} mm/min**")
-    st.write(f"- Tốc độ Spindle (S): **{ai_rec['l3']['s']} RPM**")
-    st.write(f"- Chạy tập trung nét đục")
+    st.write(f"- Spindle (S): **{ai_rec['l3']['s']} RPM**")
+    st.write(f"- Lọc nét hoa văn sâu")
 
 with col_ai4:
     st.error("🟠 **Layer 4: Cắt Biên Tranh**")
     st.write(f"- Dao gợi ý: **{ai_rec['l4']['tool']}**")
     st.write(f"- Tốc độ ăn (F): **{ai_rec['l4']['f']} mm/min**")
-    st.write(f"- Tốc độ Spindle (S): **{ai_rec['l4']['s']} RPM**")
-    st.write(f"- Cắt lặp sâu **{stock_z} mm**")
+    st.write(f"- Spindle (S): **{ai_rec['l4']['s']} RPM**")
+    st.write(f"- Cắt qua phôi: **{stock_z} mm**")
 
 st.markdown("---")
 
 # ==============================================================================
-# XỬ LÝ HÌNH ẢNH & TẠO MAP
+# XỬ LÝ HÌNH ẢNH & XUẤT G-CODE CHO UGS
 # ==============================================================================
 uploaded_file = st.file_uploader("Tải lên hình ảnh mẫu tranh gỗ", type=["png", "jpg", "jpeg", "webp"])
 
@@ -139,7 +149,7 @@ if uploaded_file:
     
     gray_img = cv2.cvtColor(np.array(raw_img), cv2.COLOR_RGB2GRAY)
     
-    # Tạo Depth Map
+    # AI Gradient Map Creation
     sobelx = cv2.Sobel(gray_img, cv2.CV_64F, 1, 0, ksize=5)
     sobely = cv2.Sobel(gray_img, cv2.CV_64F, 0, 1, ksize=5)
     edge_gradient = np.sqrt(sobelx**2 + sobely**2)
@@ -154,27 +164,18 @@ if uploaded_file:
     scale_x = stock_x / img_w
     scale_y = stock_y / img_h
 
-    # CALCULATE WORK ZERO OFFSET
-    # Chuyển đổi tọa độ tâm/góc tùy theo thiết lập Work Zero của người dùng
+    # TÍNH TOÁN LỆCH TỌA ĐỘ WORK ZERO
     if "Center" in work_zero:
-        offset_x = -stock_x / 2.0
-        offset_y = -stock_y / 2.0
+        offset_x, offset_y = -stock_x / 2.0, -stock_y / 2.0
     elif "Top-Left" in work_zero:
-        offset_x = 0.0
-        offset_y = -stock_y
+        offset_x, offset_y = 0.0, -stock_y
     elif "Top-Right" in work_zero:
-        offset_x = -stock_x
-        offset_y = -stock_y
+        offset_x, offset_y = -stock_x, -stock_y
     elif "Bottom-Right" in work_zero:
-        offset_x = -stock_x
-        offset_y = 0.0
-    else: # Bottom-Left
-        offset_x = 0.0
-        offset_y = 0.0
+        offset_x, offset_y = -stock_x, 0.0
+    else:  # Bottom-Left
+        offset_x, offset_y = 0.0, 0.0
 
-    # ==============================================================================
-    # HÀM XUẤT G-CODE NGUYÊN BẢN ĐÃ TÍNH WORK ZERO CHO GRBL / UGS
-    # ==============================================================================
     def make_grbl_header(layer_name, tool_desc, rpm):
         return [
             f"(--- {layer_name.upper()} ---)",
@@ -185,10 +186,10 @@ if uploaded_file:
             "G54 ; Work Coordinate System",
             f"G0 Z{safe_z:.3f}",
             f"M3 S{int(rpm)} ; Start Spindle",
-            "G4 P2 ; Wait 2 sec for spindle speed"
+            "G4 P2 ; Wait 2 sec for spindle"
         ]
 
-    # --- LAYER 1: PHÁ THÔ ---
+    # 1. LAYER PHÁ THÔ
     def generate_l1_roughing():
         t = ai_rec['l1']
         gcode = make_grbl_header("Layer 1 - Pha Tho", t['tool'], t['s'])
@@ -211,13 +212,12 @@ if uploaded_file:
         gcode.extend(["M5", "M30"])
         return "\n".join(gcode)
 
-    # --- LAYER 2: CHẠY TINH ---
+    # 2. LAYER CHẠY TINH
     def generate_l2_finishing():
         t = ai_rec['l2']
         gcode = make_grbl_header("Layer 2 - Chay Tinh Mnin", t['tool'], t['s'])
         step_px = max(1, int((t['dia'] * t['stepover']) / scale_x))
         
-        # Bù bán kính dao
         r_px = int(np.ceil((t['dia'] / 2.0) / scale_x))
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_px * 2 + 1, r_px * 2 + 1))
         compensated_map = cv2.erode(depth_map_mm.astype(np.float32), k)
@@ -232,10 +232,10 @@ if uploaded_file:
         gcode.extend([f"G0 Z{safe_z:.3f}", "M5", "M30"])
         return "\n".join(gcode)
 
-    # --- LAYER 3: ĐIÊU KHẮC CHI TIẾT ---
+    # 3. LAYER ĐIÊU KHẮC CHI TIẾT
     def generate_l3_pencil():
         t = ai_rec['l3']
-        gcode = make_grbl_header("Layer 3 - Dieu Khac Chit Tiet", t['tool'], t['s'])
+        gcode = make_grbl_header("Layer 3 - Dieu Khac Chi Tiet", t['tool'], t['s'])
         
         grad_thresh = max_grad * 0.35
         mask_detail = (edge_gradient > grad_thresh).astype(np.uint8)
@@ -260,21 +260,16 @@ if uploaded_file:
         gcode.extend([f"G0 Z{safe_z:.3f}", "M5", "M30"])
         return "\n".join(gcode)
 
-    # --- LAYER 4: CẮT BIÊN / TÁCH SẢN PHẨM (CUTOUT / PROFILE PASS) ---
+    # 4. LAYER CẮT BIÊN TÁCH SẢN PHẨM
     def generate_l4_cutout():
         t = ai_rec['l4']
         gcode = make_grbl_header("Layer 4 - Cat Bien Tach San Pham", t['tool'], t['s'])
         
-        # Bù bán kính dao cắt ra ngoài đường biên tranh
         r_cut = t['dia'] / 2.0
-        x_min = 0.0 - r_cut + offset_x
-        x_max = stock_x + r_cut + offset_x
-        y_min = 0.0 - r_cut + offset_y
-        y_max = stock_y + r_cut + offset_y
+        x_min, x_max = 0.0 - r_cut + offset_x, stock_x + r_cut + offset_x
+        y_min, y_max = 0.0 - r_cut + offset_y, stock_y + r_cut + offset_y
         
         passes = int(np.ceil(stock_z / t['stepdown']))
-        
-        # Đường cắt HCN bao quanh phôi
         gcode.append(f"G0 X{x_min:.3f} Y{y_min:.3f}")
         
         for p in range(1, passes + 1):
@@ -290,10 +285,10 @@ if uploaded_file:
         return "\n".join(gcode)
 
     # ==============================================================================
-    # XUẤT FILE G-CODE VÀ TẢI VỀ
+    # XUẤT FILE VÀ TẢI VỀ
     # ==============================================================================
     st.markdown("---")
-    st.header("💾 Tải Về Trọn Bộ 4 Layer G-Code Cho GRBL / UGS")
+    st.header("💾 Tải Về File G-Code Tương Ứng Với Thông Số Đã Tính")
 
     gc1 = generate_l1_roughing()
     gc2 = generate_l2_finishing()
@@ -310,7 +305,7 @@ if uploaded_file:
     with c4:
         st.download_button("💾 4. Cắt Biên (.nc)", data=gc4, file_name="04_CatBien_GRBL.nc")
 
-    # Đóng gói file ZIP
+    # Đóng gói ZIP
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
         zf.writestr("01_PhaTho_EndMill.nc", gc1)
