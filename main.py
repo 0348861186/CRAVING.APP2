@@ -42,7 +42,6 @@ def call_gemini_ai_advisor_expert(api_key, layer_name, material, width, height, 
     try:
         client = genai.Client(api_key=api_key)
         
-        # PROMPT CHUYÊN SÂU DÀNH CHO DÂN CAM CNC PRO
         prompt = f"""
         Bạn là một Chuyên Gia Lập Trình CAM CNC 3D Relief và Sư Phụ Vận Hành Máy Khắc Phù Điêu với 20 năm kinh nghiệm.
         Hãy phân tích thật CHUYÊN SÂU, CHI TIẾT và KHẮC NGHIỆT cho Layer gia công sau:
@@ -198,27 +197,26 @@ if uploaded_img:
             # 2. Dựng Mesh 3D
             mesh, x_g, y_g, z_g = depth_map_to_mesh(final_depth, width_mm, height_mm, max_depth_mm, work_zero_option)
             
-            # 3. GỌI GEMINI AI CHUYÊN SÂU TƯ VẤN DAO CHO TẤT CẢ LAYER
+            # 3. ĐỒNG BỘ ĐÚNG TÊN KEY CHO TẤT CẢ LAYER
             ai_advices = {}
             gcode_files = {}
 
-            # Khai báo thông số để Gemini AI soi
             layer_configs = {
-                "Layer 1: Phá Thô": {"name": "Phay Phá Thô (Roughing)", "tool": "Endmill Flat D6mm (Dao Phay Mặt Cắt Bằng)", "spindle": 18000, "feed": 3200, "so": 50, "sd": 3.5, "so_mm": 3.0},
-                "Layer 2: Bán Tinh": {"name": "Phay Bán Tinh (Semi-Finish)", "tool": "Ballnose D4mm (Dao Cầu Tròn D4)", "spindle": 20000, "feed": 2500, "so": 20, "sd": None, "so_mm": 0.8},
-                "Layer 3: Phay Tinh 3D": {"name": "Phay Tinh 3D (Finishing)", "tool": "Tapered Ballnose R0.5mm Góc 5° (Dao Cầu Nón)", "spindle": 22000, "feed": 2000, "so": 8, "sd": None, "so_mm": 0.08},
-                "Layer 4: Khắc V-Bit": {"name": "Khắc Chi Tiết Nét Mỏng", "tool": "Dao V-Bit Góc 30° Mũi 0.2mm", "spindle": 24000, "feed": 1400, "so": 5, "sd": None, "so_mm": 0.05},
-                "Layer 5: Cắt Biên": {"name": "Cắt Khung Biên Bức Tranh", "tool": "Endmill Flat D6mm 2 Lưỡi Thẳng", "spindle": 18000, "feed": 1800, "so": 100, "sd": 4.0, "so_mm": 6.0}
+                "layer_1": {"name": "Phay Phá Thô (Roughing)", "tool": "Endmill Flat D6mm (Dao Phay Mặt Cắt Bằng)", "spindle": 18000, "feed": 3200, "so": 50, "sd": 3.5, "so_mm": 3.0},
+                "layer_2": {"name": "Phay Bán Tinh (Semi-Finish)", "tool": "Ballnose D4mm (Dao Cầu Tròn D4)", "spindle": 20000, "feed": 2500, "so": 20, "sd": None, "so_mm": 0.8},
+                "layer_3": {"name": "Phay Tinh 3D (Finishing)", "tool": "Tapered Ballnose R0.5mm Góc 5° (Dao Cầu Nón)", "spindle": 22000, "feed": 2000, "so": 8, "sd": None, "so_mm": 0.08},
+                "layer_4": {"name": "Khắc Chi Tiết Nét Mỏng", "tool": "Dao V-Bit Góc 30° Mũi 0.2mm", "spindle": 24000, "feed": 1400, "so": 5, "sd": None, "so_mm": 0.05},
+                "layer_5": {"name": "Cắt Khung Biên Bức Tranh", "tool": "Endmill Flat D6mm 2 Lưỡi Thẳng", "spindle": 18000, "feed": 1800, "so": 100, "sd": 4.0, "so_mm": 6.0}
             }
 
             for l_key, cfg in layer_configs.items():
-                # Call AI Expert
+                # Gọi AI Expert
                 ai_advices[l_key] = call_gemini_ai_advisor_expert(
                     gemini_api_key, cfg["name"], material, width_mm, height_mm, max_depth_mm,
                     cfg["tool"], cfg["spindle"], cfg["feed"], cfg["so"], cfg["sd"]
                 )
-                # G-Code
-                if "Cắt Biên" in cfg["name"]:
+                # Xuất G-Code
+                if l_key == "layer_5":
                     gcode_files[l_key] = f"(--- LAYER 5: PROFILE CUT ---\nG21\nG90\nM3 S{cfg['spindle']}\nG0 Z{safe_z}\nG0 X0 Y0\nG1 Z-{max_depth_mm} F{cfg['feed']}\nG1 X{width_mm}\nG1 Y{height_mm}\nG1 X0\nG1 Y0\nG0 Z{safe_z}\nM5\nM30"
                 else:
                     gcode_files[l_key] = generate_layer_gcode(cfg["name"], x_g, y_g, z_g, cfg["so_mm"], cfg["feed"], cfg["spindle"], safe_z, cfg["tool"])
@@ -259,28 +257,30 @@ if st.session_state.get('processed', False):
             "Layer 5: Cắt Biên"
         ])
 
+        # ĐỒNG BỘ ĐÚNG MÃ KEY VỚI LAYER_CONFIGS Ở TRÊN
         tab_mapping = [
-            ("Layer 1: Phá Thô", layer_tabs[0], "Layer1_PhaTho.nc"),
-            ("Layer 2: Bán Tinh", layer_tabs[1], "Layer2_BanTinh.nc"),
-            ("Layer 3: Phay Tinh 3D", layer_tabs[2], "Layer3_PhayTinh.nc"),
-            ("Layer 4: Khắc V-Bit", layer_tabs[3], "Layer4_KhacChiTiet.nc"),
-            ("Layer 5: Cắt Biên", layer_tabs[4], "Layer5_CatBien.nc"),
+            ("layer_1", "Layer 1: Phá Thô", layer_tabs[0], "Layer1_PhaTho.nc"),
+            ("layer_2", "Layer 2: Bán Tinh", layer_tabs[1], "Layer2_BanTinh.nc"),
+            ("layer_3", "Layer 3: Phay Tinh 3D", layer_tabs[2], "Layer3_PhayTinh.nc"),
+            ("layer_4", "Layer 4: Khắc V-Bit", layer_tabs[3], "Layer4_KhacChiTiet.nc"),
+            ("layer_5", "Layer 5: Cắt Biên", layer_tabs[4], "Layer5_CatBien.nc"),
         ]
 
-        for key, tab_obj, file_name in tab_mapping:
+        for key_id, title_name, tab_obj, file_name in tab_mapping:
             with tab_obj:
-                st.markdown(f"### 📌 Phân Tích Chuyên Sâu - {key}")
+                st.markdown(f"### 📌 Phân Tích Chuyên Sâu - {title_name}")
                 
-                # HIỂN THỊ TƯ VẤN SÂU
-                st.markdown(st.session_state['ai_advices'][key])
+                # HIỂN THỊ TƯ VẤN SÂU AN TOÀN BẰNG ID DẠNG 'layer_1', 'layer_2'...
+                st.markdown(st.session_state['ai_advices'].get(key_id, "Không có dữ liệu tư vấn."))
                 
                 st.markdown("---")
                 st.write("💾 **Mã G-Code Tương Ứng:**")
-                st.text_area("Xem trước mã G-Code:", st.session_state['gcode_files'][key][:300] + "\n...", height=120, key=f"txt_{key}")
+                gcode_data = st.session_state['gcode_files'].get(key_id, "")
+                st.text_area("Xem trước mã G-Code:", gcode_data[:300] + "\n...", height=120, key=f"txt_{key_id}")
                 st.download_button(
                     label=f"📥 Tải File G-Code ({file_name})",
-                    data=st.session_state['gcode_files'][key],
+                    data=gcode_data,
                     file_name=file_name,
                     mime="text/plain",
-                    key=f"dl_{key}"
+                    key=f"dl_{key_id}"
                 )
