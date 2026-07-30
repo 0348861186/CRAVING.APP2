@@ -1,491 +1,217 @@
 import streamlit as st
 import numpy as np
 import cv2
-from PIL import Image
-import math
-import torch
+from PIL import Image, ImageEnhance
+import matplotlib.pyplot as plt
+import io
 
-# -----------------------------------------------------------------------------
-# TỐI ƯU HÓA HỆ THỐNG: Khống chế CPU Threads tránh bị Throttling
-# -----------------------------------------------------------------------------
-torch.set_num_threads(2)
-
+# ==========================================
+# CẤU HÌNH TRANG DASHBOARD CHUYÊN NGHIỆP
+# ==========================================
 st.set_page_config(
-    page_title="AI CNC Wood Carving Studio (GRBL / UGS)",
+    page_title="Wood CNC 3D Relief Generator",
     page_icon="🪵",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# App Custom Styling
+# Custom CSS cho giao diện Dashboard
 st.markdown("""
-<style>
-    .main-title { font-size: 2.2rem; font-weight: 700; color: #5A3E2B; margin-bottom: 0px; }
-    .sub-title { font-size: 1.0rem; color: #8C6D53; margin-bottom: 20px; }
-    .ai-badge { background-color: #E0F2FE; color: #0369A1; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
-    .warning-badge { background-color: #FEF3C7; color: #B45309; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
-</style>
+    <style>
+    .main-header {
+        font-size: 28px;
+        font-weight: bold;
+        color: #4A2E16;
+        text-align: center;
+        padding: 10px;
+        background-color: #F8F1E7;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
+    .step-card {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        border-left: 5px solid #8B5A2B;
+        margin-bottom: 15px;
+    }
+    .stButton>button {
+        background-color: #8B5A2B;
+        color: white;
+        border-radius: 6px;
+        font-weight: bold;
+        width: 100%;
+    }
+    </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🪵 AI CNC Wood Carving Studio</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Hệ thống xử lý ảnh AI & Tự động sinh G-code Chuyển đổi Tranh Gỗ 2D/3D (Chuẩn GRBL & Universal Gcode Sender - UGS)</p>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🪵 MÁY TẠO MÃ G-CODE PHAY TRANH GỖ 3D (AI & CAM)</div>', unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# SESSION STATE INITIALIZATION
-# -----------------------------------------------------------------------------
-if 'processed_img' not in st.session_state:
-    st.session_state.processed_img = None
-if 'original_img' not in st.session_state:
-    st.session_state.original_img = None
-if 'depth_map' not in st.session_state:
-    st.session_state.depth_map = None
+# ==========================================
+# SIDEBAR: CẤU HÌNH THÔNG SỐ CNC & CAM
+# ==========================================
+st.sidebar.header("⚙️ Cấu Hình Máy CNC & Dao")
 
-# -----------------------------------------------------------------------------
-# SIDEBAR - BOARD & STOCK DIMENSIONS & WORK PIECE SETTINGS
-# -----------------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ 1. Thông Số Phôi & Khổ Ván")
-    
-    st.subheader("📋 Tấm Ván Tổng (Sheet)")
-    board_w = st.number_input("Chiều rộng ván X (mm)", value=1200.0, step=50.0, min_value=100.0)
-    board_h = st.number_input("Chiều dài ván Y (mm)", value=800.0, step=50.0, min_value=100.0)
-    board_z = st.number_input("Độ dày ván Z (mm)", value=18.0, step=1.0, min_value=1.0)
-    
-    st.subheader("🪵 Phôi Gia Công (Workpiece)")
-    stock_w = st.number_input("Rộng phôi X (mm)", value=300.0, step=10.0, min_value=10.0, max_value=board_w)
-    stock_h = st.number_input("Dài phôi Y (mm)", value=400.0, step=10.0, min_value=10.0, max_value=board_h)
-    target_depth = st.number_input("Độ sâu khắc tối đa Z (mm)", value=10.0, step=0.5, min_value=0.5, max_value=board_z)
-    
-    st.subheader("📍 Tọa Độ Mốc (Zero Origin)")
-    offset_x = st.number_input("Vị trí X trên ván (mm)", value=50.0, step=5.0, max_value=max(board_w-stock_w, 0.0))
-    offset_y = st.number_input("Vị trí Y trên ván (mm)", value=50.0, step=5.0, max_value=max(board_h-stock_h, 0.0))
-    z_safe = st.number_input("Mặt phẳng an toàn Z-Safe (mm)", value=5.0, step=1.0, min_value=1.0)
-    
-    st.markdown("---")
-    st.info("💡 **Ghi chú GRBL/UGS:** G-code sinh ra sử dụng hệ tọa độ chuẩn `G90`, đơn vị `G21` (mm) tương thích hoàn toàn với UGS, Candle và Mach3.")
+# Kích thước phôi gỗ
+st.sidebar.subheader("1. Kích thước phôi (mm)")
+width_mm = st.sidebar.number_input("Chiều rộng (X)", value=200, step=10)
+height_mm = st.sidebar.number_input("Chiều cao (Y)", value=200, step=10)
+max_depth_mm = st.sidebar.number_input("Độ sâu khắc tối đa (Z)", value=10.0, step=0.5, help="Chiều sâu phay âm xuống gỗ")
 
-# -----------------------------------------------------------------------------
-# CACHED AI & PIPELINE FUNCTIONS
-# -----------------------------------------------------------------------------
+# Thông số dao & cắt
+st.sidebar.subheader("2. Thông số Dao & Cắt")
+tool_diameter = st.sidebar.number_input("Đường kính dao (mm)", value=3.175, step=0.1)
+stepover_ratio = st.sidebar.slider("Độ dịch dao ngang (% đường kính dao)", 10, 100, 40) / 100.0
+feed_rate = st.sidebar.number_input("Tốc độ cắt F (mm/phút)", value=1200, step=100)
+spindle_speed = st.sidebar.number_input("Tốc độ trục chính S (RPM)", value=12000, step=1000)
+safe_z = st.sidebar.number_input("Độ cao an toàn Safe Z (mm)", value=5.0, step=1.0)
 
-# ✅ ĐIỂM 1: Thay fastNlMeansDenoisingColored -> cv2.bilateralFilter
-@st.cache_data(show_spinner=False)
-def ai_stage_1_processing(img_np, sharpness=2.0, contrast=1.5, denoise=True):
-    img_pil = Image.fromarray(img_np)
-    img_pil.thumbnail((800, 800))
-    
-    img_array = np.array(img_pil.convert('RGB'))
-    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    
-    if denoise:
-        img_bgr = cv2.bilateralFilter(img_bgr, d=7, sigmaColor=50, sigmaSpace=50)
-    
-    gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 3.0)
-    sharpened = cv2.addWeighted(img_bgr, 1.0 + (sharpness * 0.5), gaussian, -(sharpness * 0.5), 0)
-    
-    lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
-    l_channel, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=contrast * 2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l_channel)
-    limg = cv2.merge((cl, a, b))
-    enhanced_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-    
-    return cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
+# ==========================================
+# CÁC HÀM XỬ LÝ THEO QUY TRÌNH (ENGINE)
+# ==========================================
 
-# ✅ ĐIỂM 3 & 5: MiDaS PyTorch Hub Native + torch.inference_mode
-@st.cache_resource
-def load_midas_pytorch():
-    model_type = "MiDaS_small"
-    midas = torch.hub.load("intel-isl/MiDaS", model_type)
-    midas.eval()
-    
-    midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
-    transform = midas_transforms.small_transform
-    return midas, transform
+def ai_restore_image(img):
+    """Bước 2: AI / Phục hồi & Tối ưu ảnh đầu vào"""
+    img_np = np.array(img)
+    # Khử nhiễu
+    denoised = cv2.fastNlMeansDenoisingColored(img_np, None, 10, 10, 7, 21)
+    # Tăng cường tương phản (CLAHE)
+    lab = cv2.cvtColor(denoised, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl,a,b))
+    restored = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+    return restored
 
-# ✅ ĐIỂM 2: Khống chế Depth output còn max 800px
-@st.cache_data(show_spinner=False)
-def ai_stage_2_depth_map(enhanced_np):
-    model, transform = load_midas_pytorch()
-    
-    input_batch = transform(enhanced_np)
-    
-    with torch.inference_mode():
-        prediction = model(input_batch)
-        prediction = torch.nn.functional.interpolate(
-            prediction.unsqueeze(1),
-            size=enhanced_np.shape[:2],
-            mode="bicubic",
-            align_corners=False,
-        ).squeeze()
-        
-    depth = prediction.cpu().numpy()
-    
-    h_orig, w_orig = depth.shape
-    max_side = 800
-    if max(h_orig, w_orig) > max_side:
-        scale = max_side / float(max(h_orig, w_orig))
-        out_w, out_h = int(w_orig * scale), int(h_orig * scale)
-        depth = cv2.resize(depth, (out_w, out_h), interpolation=cv2.INTER_CUBIC)
-        
-    depth_normalized = cv2.normalize(depth, None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    return 255 - depth_normalized
+def ai_segment_object(img_np):
+    """Bước 3: AI phân tích / Tách đối tượng & Làm rõ biên dạng"""
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    # Làm nổi bật cạnh nét bằng Unsharp Masking
+    gaussian = cv2.GaussianBlur(gray, (0, 0), 2.0)
+    unsharp = cv2.addWeighted(gray, 1.5, gaussian, -0.5, 0)
+    return unsharp
 
-# -----------------------------------------------------------------------------
-# HELPER FUNCTIONS: G-CODE GENERATOR
-# -----------------------------------------------------------------------------
-
-# ✅ ĐIỂM 4: Giảm G-code sampling adaptive tự động
-def optimize_depth_map_for_gcode(depth_map, tool_dia, max_dim=160):
-    h, w = depth_map.shape
-    adaptive_max_dim = int(np.clip(max_dim * (3.0 / max(tool_dia, 1.0)), 80, max_dim))
-    
-    if max(h, w) > adaptive_max_dim:
-        scale = adaptive_max_dim / float(max(h, w))
-        new_w, new_h = int(w * scale), int(h * scale)
-        return cv2.resize(depth_map, (new_w, new_h), interpolation=cv2.INTER_AREA)
+def generate_depth_map(gray_img):
+    """Bước 4 & 5: AI Tạo chiều sâu 3D & 3D Relief Engine"""
+    # Chuẩn hóa giá trị xám từ 0.0 đến 1.0 (0: Đen/Sâu nhất, 1: Trắng/Nông nhất)
+    depth_map = gray_img.astype(float) / 255.0
+    # Làm mịn nhẹ chiều sâu để dao di chuyển mượt mà
+    depth_map = cv2.GaussianBlur(depth_map, (3, 3), 0)
     return depth_map
 
-@st.cache_data(show_spinner=False)
-def generate_roughing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, stepdown, feedrate, spindle_rpm, z_safe, off_x=0.0, off_y=0.0):
-    dmap = optimize_depth_map_for_gcode(depth_map, tool_dia=tool_dia, max_dim=120)
-    h, w = dmap.shape
-    
-    lines = [
-        "(--- LAYER 1: PHA THO 3D / ROUGHING CARVING ---)",
-        "(G-code sinh cho GRBL + UGS)",
-        "G21 ; Don vi mm",
-        "G90 ; Toa do tuyet doi",
-        f"M03 S{int(spindle_rpm)} ; Bat truc chinh RPM",
-        f"G00 Z{z_safe:.3f} ; Nac dao an toan"
-    ]
-    
-    step_x = max(tool_dia * (stepover_pct / 100.0), 0.5)
-    step_y = max(tool_dia * (stepover_pct / 100.0), 0.5)
-    cols = max(1, int(stock_w / step_x))
-    rows = max(1, int(stock_h / step_y))
-    num_passes = math.ceil(target_depth / stepdown)
-    
-    for current_pass in range(1, num_passes + 1):
-        pass_z = min(current_pass * stepdown, target_depth)
-        lines.append(f"(; --- Luot pha tho depth = -{pass_z:.2f} mm ---)")
-        for r in range(0, rows):
-            rel_y = r * step_y
-            y_pos = off_y + rel_y
-            py = min(int((rel_y / stock_h) * (h - 1)), h - 1)
-            x_range = range(0, cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-            
-            for c in x_range:
-                rel_x = c * step_x
-                x_pos = off_x + rel_x
-                px = min(int((rel_x / stock_w) * (w - 1)), w - 1)
-                normalized_depth = (dmap[py, px] / 255.0) * pass_z
-                z_pos = -normalized_depth
-                
-                if c == x_range[0]:
-                    lines.append(f"G00 X{x_pos:.3f} Y{y_pos:.3f}")
-                    lines.append(f"G01 Z{z_pos:.3f} F{int(feedrate/2)}")
-                else:
-                    lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
-        lines.append(f"G00 Z{z_safe:.3f}")
+def generate_gcode(depth_map, w_mm, h_mm, max_z, step_ratio, tool_d, f_rate, s_speed, z_safe):
+    """Bước 6, 7, 8: CAM Engine, Toolpath Generator & G-Code Export (GRBL/UGS)"""
+    rows, cols = depth_map.shape
+    step_x = w_mm / cols
+    step_y = tool_d * step_ratio
+    num_passes_y = int(np.ceil(h_mm / step_y))
 
-    lines.extend([f"G00 Z{z_safe:.3f}", "M05", f"G00 X{off_x:.3f} Y{off_y:.3f}", "M30"])
-    return "\n".join(lines)
+    gcode = []
+    gcode.append("(=== CREATED BY WOOD CNC RELIEF GENERATOR ===)")
+    gcode.append("(Dành cho máy GRBL / Universal Gcode Sender)")
+    gcode.append("G90 G21 (Tuyet doi, Don vi mm)")
+    gcode.append(f"M3 S{int(s_speed)} (Bat truc chinh)")
+    gcode.append(f"G0 Z{z_safe:.3f} (Dua dao len cao an toan)")
 
-@st.cache_data(show_spinner=False)
-def generate_finishing_gcode(depth_map, stock_w, stock_h, target_depth, tool_dia, stepover_pct, feedrate, spindle_rpm, z_safe, off_x=0.0, off_y=0.0):
-    dmap = optimize_depth_map_for_gcode(depth_map, tool_dia=tool_dia, max_dim=220)
-    h, w = dmap.shape
-    
-    lines = [
-        "(--- LAYER 2: KHAC TINH 3D / FINISHING CARVING ---)",
-        "(G-code sinh cho GRBL + UGS)",
-        "G21", "G90",
-        f"M03 S{int(spindle_rpm)}",
-        f"G00 Z{z_safe:.3f}"
-    ]
-    
-    step_x = max(tool_dia * (stepover_pct / 100.0), 0.2)
-    step_y = max(tool_dia * (stepover_pct / 100.0), 0.2)
-    cols = max(1, int(stock_w / step_x))
-    rows = max(1, int(stock_h / step_y))
-    
-    for r in range(0, rows):
-        rel_y = r * step_y
-        y_pos = off_y + rel_y
-        py = min(int((rel_y / stock_h) * (h - 1)), h - 1)
-        x_range = range(0, cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+    # Lập trình đường dao phay đan lưới (Raster Strategy)
+    for i in range(num_passes_y):
+        y_pos = i * step_y
+        if y_pos > h_mm:
+            y_pos = h_mm
         
-        for c in x_range:
-            rel_x = c * step_x
-            x_pos = off_x + rel_x
-            px = min(int((rel_x / stock_w) * (w - 1)), w - 1)
-            z_pos = -((dmap[py, px] / 255.0) * target_depth)
-            
-            if c == x_range[0]:
-                lines.append(f"G00 X{x_pos:.3f} Y{y_pos:.3f}")
-                lines.append(f"G01 Z{z_pos:.3f} F{int(feedrate/2)}")
-            else:
-                lines.append(f"G01 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{int(feedrate)}")
-                
-    lines.extend([f"G00 Z{z_safe:.3f}", "M05", f"G00 X{off_x:.3f} Y{off_y:.3f}", "M30"])
-    return "\n".join(lines)
+        # Lấy dòng tương ứng trong depth map
+        row_idx = int((y_pos / h_mm) * (rows - 1))
+        
+        # Đi từ trái sang phải hoặc ngược lại để tối ưu hành trình
+        x_indices = range(cols) if i % 2 == 0 else range(cols - 1, -1, -1)
+        
+        # Di chuyển nhanh đến đầu đường phay
+        first_x = (x_indices[0] / (cols - 1)) * w_mm
+        gcode.append(f"G0 X{first_x:.3f} Y{y_pos:.3f}")
+        
+        for j in x_indices:
+            x_pos = (j / (cols - 1)) * w_mm
+            # Độ sâu Z: Ảnh tối = Phay sâu (-max_z), Ảnh sáng = Phay nông (0)
+            z_pos = -1.0 * (1.0 - depth_map[row_idx, j]) * max_z
+            gcode.append(f"G1 X{x_pos:.3f} Y{y_pos:.3f} Z{z_pos:.3f} F{f_rate}")
 
-@st.cache_data(show_spinner=False)
-def generate_cutout_gcode(stock_w, stock_h, stock_thickness, tool_dia, stepdown, feedrate, spindle_rpm, z_safe, tab_width, tab_height, tab_count, off_x=0.0, off_y=0.0):
-    lines = [
-        "(--- LAYER 3: CAT BIEN & TAO TAB / CUTOUT CONTOUR ---)",
-        "G21", "G90",
-        f"M03 S{int(spindle_rpm)}",
-        f"G00 Z{z_safe:.3f}"
-    ]
-    
-    r = tool_dia / 2.0
-    x0, y0 = off_x - r, off_y - r
-    x1, y1 = off_x + stock_w + r, off_y + stock_h + r
-    num_passes = math.ceil(stock_thickness / stepdown)
-    
-    for p in range(1, num_passes + 1):
-        current_z = -min(p * stepdown, stock_thickness)
-        lines.append(f"(; --- Luot cat depth = {current_z:.2f} mm ---)")
-        
-        path_segments = [
-            ((x0, y0), (x1, y0), "H"),
-            ((x1, y0), (x1, y1), "V"),
-            ((x1, y1), (x0, y1), "H"),
-            ((x0, y1), (x0, y0), "V")
-        ]
-        
-        lines.append(f"G00 X{x0:.3f} Y{y0:.3f}")
-        lines.append(f"G01 Z{current_z:.3f} F{int(feedrate/2)}")
-        
-        for p_start, p_end, orient in path_segments:
-            is_final_pass = (p == num_passes) or (abs(current_z) >= (stock_thickness - tab_height))
-            if is_final_pass:
-                mid_x = (p_start[0] + p_end[0]) / 2.0
-                mid_y = (p_start[1] + p_end[1]) / 2.0
-                tab_z = min(current_z + tab_height, 0.0)
-                
-                if orient == "H":
-                    lines.append(f"G01 X{mid_x - tab_width/2:.3f} Y{mid_y:.3f} Z{current_z:.3f} F{int(feedrate)}")
-                    lines.append(f"G01 Z{tab_z:.3f} F{int(feedrate/2)}")
-                    lines.append(f"G01 X{mid_x + tab_width/2:.3f} Y{mid_y:.3f} F{int(feedrate)}")
-                    lines.append(f"G01 Z{current_z:.3f} F{int(feedrate/2)}")
-                    lines.append(f"G01 X{p_end[0]:.3f} Y{p_end[1]:.3f} F{int(feedrate)}")
-                else:
-                    lines.append(f"G01 X{mid_x:.3f} Y{mid_y - tab_width/2:.3f} Z{current_z:.3f} F{int(feedrate)}")
-                    lines.append(f"G01 Z{tab_z:.3f} F{int(feedrate/2)}")
-                    lines.append(f"G01 X{mid_x:.3f} Y{mid_y + tab_width/2:.3f} F{int(feedrate)}")
-                    lines.append(f"G01 Z{current_z:.3f} F{int(feedrate/2)}")
-                    lines.append(f"G01 X{p_end[0]:.3f} Y{p_end[1]:.3f} F{int(feedrate)}")
-            else:
-                lines.append(f"G01 X{p_end[0]:.3f} Y{p_end[1]:.3f} F{int(feedrate)}")
-                
-    lines.extend([f"G00 Z{z_safe:.3f}", "M05", f"G00 X{off_x:.3f} Y{off_y:.3f}", "M30"])
-    return "\n".join(lines)
+    gcode.append(f"G0 Z{z_safe:.3f} (Rut dao)")
+    gcode.append("G0 X0 Y0 (Ve gốc tọa độ)")
+    gcode.append("M5 (Tat truc chinh)")
+    gcode.append("M30 (Kiet thuc chuong trinh)")
 
-# -----------------------------------------------------------------------------
-# MAIN INTERFACE & WORKFLOW
-# -----------------------------------------------------------------------------
-tab_upload, tab_layers, tab_3d = st.tabs([
-    "🖼️ 1. Upload & AI Xử Lý Ảnh",
-    "🔲 2. Phân Layer Gia Công & Sinh G-Code",
-    "🖥️ 3. Dashboard Mô Phỏng Trực Quan 3D Ván"
-])
+    return "\n".join(gcode)
 
-with tab_upload:
-    st.subheader("1. Tải Lên Ảnh Tranh Gỗ Mẫu & Xử Lý AI Siêu Nét")
-    uploaded_file = st.file_uploader("Chọn ảnh bức tranh (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
-    
-    if uploaded_file:
-        st.session_state.original_img = Image.open(uploaded_file)
-        
-        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
-        with col_ctrl1:
-            sharp_val = st.slider("Độ sắc nét AI (Sharpness)", 0.5, 4.0, 2.0, 0.1)
-        with col_ctrl2:
-            contrast_val = st.slider("Độ tương phản (Contrast)", 0.8, 2.5, 1.4, 0.1)
-        with col_ctrl3:
-            denoise_chk = st.checkbox("Khử nhiễu siêu tốc (Bilateral Filter)", value=True)
-            
-        if st.button("🚀 Kích Hoạt AI Xử Lý Ảnh", type="primary"):
-            with st.spinner("Đang suy luận Depth Map qua MiDaS PyTorch..."):
-                img_np = np.array(st.session_state.original_img.convert('RGB'))
-                
-                enhanced_np = ai_stage_1_processing(
-                    img_np, 
-                    sharpness=sharp_val, 
-                    contrast=contrast_val, 
-                    denoise=denoise_chk
-                )
-                depth_map = ai_stage_2_depth_map(enhanced_np)
-                
-                st.session_state.processed_img = Image.fromarray(enhanced_np)
-                st.session_state.depth_map = depth_map
-                st.success("Xử lý ảnh bằng PyTorch Deep Learning hoàn tất!")
-                
-        if st.session_state.original_img is not None:
-            st.markdown("---")
-            st.markdown("#### 🔍 Đối Chiếu So Sánh Ảnh Gốc vs Ảnh AI Đã Xử Lý")
-            col_img1, col_img2 = st.columns(2)
-            
-            with col_img1:
-                st.image(st.session_state.original_img, caption="📷 Ảnh Gốc Tải Lên", use_container_width=True)
-                
-            with col_img2:
-                if st.session_state.processed_img is not None:
-                    st.image(st.session_state.processed_img, caption="✨ Ảnh AI Tầng 1 (Enhanced & Contrast)", use_container_width=True)
-                else:
-                    st.info("Nhấn 'Kích Hoạt AI Xử Lý Ảnh' để xem kết quả.")
-                    
-            if st.session_state.depth_map is not None:
-                st.markdown("#### 🗺️ Bản Đồ Độ Sâu 3D (Heightmap max 800px)")
-                st.image(st.session_state.depth_map, caption="Heightmap 3D trích xuất cho dao CNC", use_container_width=True)
+# ==========================================
+# GIAO DIỆN CHÍNH (MAIN DASHBOARD BOARD)
+# ==========================================
 
-with tab_layers:
-    st.subheader("2. Quản Lý Layer Gia Công & Sinh G-Code Cho GRBL / UGS")
+uploaded_file = st.file_uploader("📂 Bước 1: Tải ảnh khách gửi (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
+
+if uploaded_file is not None:
+    raw_image = Image.open(uploaded_file).convert("RGB")
     
-    if st.session_state.depth_map is None:
-        st.warning("⚠️ Vui lòng tải ảnh và kích hoạt AI xử lý tại Tab 1 trước khi cấu hình Layer.")
-    else:
-        st.markdown("AI đã tự động phân tích ảnh và sinh **3 Layer Gia Công Chuẩn CNC**:")
-        
-        # LAYER 1: PHA THÔ 3D
-        with st.expander("🔨 LAYER 1: PHA THÔ 3D (ROUGHING CARVING)", expanded=True):
-            st.markdown('<span class="ai-badge">🤖 AI Advisor: Đề xuất sử dụng dao Endmill 6mm / Phá vạt nhanh vùng gỗ thừa.</span>', unsafe_allow_html=True)
+    st.subheader("🔄 Tiến trình xử lý tự động")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown("**1. Ảnh gốc khách gửi**")
+        st.image(raw_image, use_container_width=True)
+
+    # Thực hiện quy trình AI & CAM
+    with st.spinner("Đang chạy AI Phục hồi & Phân tích..."):
+        restored_img = ai_restore_image(raw_image)
+        segmented_img = ai_segment_object(restored_img)
+        depth_map = generate_depth_map(segmented_img)
+
+    with col2:
+        st.markdown("**2. AI Phục hồi & Nét hóa**")
+        st.image(restored_img, use_container_width=True)
+
+    with col3:
+        st.markdown("**3. AI Phân tích đối tượng**")
+        st.image(segmented_img, use_container_width=True, cmap="gray")
+
+    with col4:
+        st.markdown("**4. AI 3D Depth Map**")
+        # Hiển thị depth map dưới dạng heatmap relief
+        fig, ax = plt.subplots()
+        cax = ax.imshow(depth_map, cmap='magma')
+        plt.axis('off')
+        st.pyplot(fig, use_container_width=True)
+
+    st.divider()
+
+    # Tạo Mã G-Code
+    st.subheader("🛠️ Kết xuất CAM Engine & G-Code")
+    
+    if st.button("🚀 BẮT ĐẦU TẠO ĐƯỜNG DAO & MÃ G-CODE GRBL"):
+        with st.spinner("Đang tính toán Toolpath và tạo mã G-code..."):
+            gcode_text = generate_gcode(
+                depth_map, width_mm, height_mm, max_depth_mm, 
+                stepover_ratio, tool_diameter, feed_rate, spindle_speed, safe_z
+            )
             
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                l1_tool_type = st.selectbox("Loại dao", ["Endmill (Dao bằng)", "Bullnose", "Flycutter"], index=0, key="l1_type")
-                l1_tool_dia = st.number_input("Đường kính dao (mm)", value=6.0, step=0.5, key="l1_dia")
-            with c2:
-                l1_stepdown = st.number_input("Độ sâu mỗi lượt Z (mm)", value=3.0, step=0.5, key="l1_sd")
-                l1_stepover = st.slider("Dịch dao % (Stepover)", 10, 80, 40, key="l1_so")
-            with c3:
-                l1_feed = st.number_input("Tốc độ tiến dao F (mm/min)", value=1800, step=100, key="l1_feed")
-                l1_rpm = st.number_input("Tốc độ trục S (RPM)", value=15000, step=1000, key="l1_rpm")
-            with c4:
-                st.markdown("**AI Consultation Safety:**")
-                if l1_stepdown > l1_tool_dia / 2:
-                    st.markdown('<span class="warning-badge">⚠️ Cảnh báo: Độ sâu Z quá lớn dễ gãy dao gỗ cứng!</span>', unsafe_allow_html=True)
-                else:
-                    st.success("✅ Thông số an toàn tối ưu cho gỗ MDF/Gụ/Hương.")
+            c_left, c_right = st.columns([2, 1])
             
-            if st.button("⚙️ Sinh G-Code Layer 1", key="btn_g1"):
-                gcode_l1 = generate_roughing_gcode(
-                    st.session_state.depth_map, stock_w, stock_h, target_depth,
-                    l1_tool_dia, l1_stepover, l1_stepdown, l1_feed, l1_rpm, z_safe,
-                    off_x=offset_x, off_y=offset_y
-                )
+            with c_left:
+                st.markdown("**Xem trước mã G-code (50 dòng đầu):**")
+                st.code("\n".join(gcode_text.split("\n")[:50]) + "\n...", language="gcode")
+            
+            with c_right:
+                st.success("✅ Tạo đường dao CNC thành công!")
+                st.info(f"📍 Kích thước: {width_mm}x{height_mm} mm\n\n📉 Độ sâu Z max: -{max_depth_mm} mm\n\n⏱️ Chuẩn mã: GRBL / UGS")
+                
+                # Nút Tải G-code về máy
                 st.download_button(
-                    label="📥 Tải G-Code Layer 1 (Layer1_Roughing.nc)",
-                    data=gcode_l1,
-                    file_name="Layer1_Roughing.nc",
+                    label="📥 TẢI FILE .NC (G-CODE DÙNG CHO UGS)",
+                    data=gcode_text,
+                    file_name="tranh_go_3d.nc",
                     mime="text/plain"
                 )
 
-        # LAYER 2: KHẮC TINH 3D
-        with st.expander("✨ LAYER 2: KHẮC TINH CHI TIẾT 3D (FINISHING CARVING)", expanded=False):
-            st.markdown('<span class="ai-badge">🤖 AI Advisor: Đề xuất Dao Cầu / Tapered Ballnose 2mm R0.5 / Độ nét tinh xảo.</span>', unsafe_allow_html=True)
-            
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                l2_tool_type = st.selectbox("Loại dao", ["Tapered Ballnose (Dao cầu nón)", "Ballnose (Dao cầu)", "V-Bit 15°"], index=0, key="l2_type")
-                l2_tool_dia = st.number_input("Đường kính dao (mm)", value=2.0, step=0.1, key="l2_dia")
-            with c2:
-                l2_stepover = st.slider("Dịch dao % (Stepover tinh)", 5, 25, 10, key="l2_so")
-                l2_feed = st.number_input("Tốc độ tiến dao F (mm/min)", value=2200, step=100, key="l2_feed")
-            with c3:
-                l2_rpm = st.number_input("Tốc độ trục S (RPM)", value=18000, step=1000, key="l2_rpm")
-            with c4:
-                st.markdown("**AI Consultation Safety:**")
-                st.success("✅ Stepover 10% giúp bề mặt mịn không cần xả nhám.")
-            
-            if st.button("⚙️ Sinh G-Code Layer 2", key="btn_g2"):
-                gcode_l2 = generate_finishing_gcode(
-                    st.session_state.depth_map, stock_w, stock_h, target_depth,
-                    l2_tool_dia, l2_stepover, l2_feed, l2_rpm, z_safe,
-                    off_x=offset_x, off_y=offset_y
-                )
-                st.download_button(
-                    label="📥 Tải G-Code Layer 2 (Layer2_Finishing.nc)",
-                    data=gcode_l2,
-                    file_name="Layer2_Finishing.nc",
-                    mime="text/plain"
-                )
-
-        # LAYER 3: CẮT BIÊN & TẠO TAB
-        with st.expander("✂️ LAYER 3: CẮT BIÊN & TẠO CẦU GIỮ PHÔI (CUTOUT & TABS)", expanded=False):
-            st.markdown('<span class="ai-badge">🤖 AI Advisor: Tự động tính toán Tab cầu giữ chống văng phôi khi đứt ván.</span>', unsafe_allow_html=True)
-            
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                l3_tool_dia = st.number_input("Đường kính dao cắt (mm)", value=6.0, step=0.5, key="l3_dia")
-                l3_stepdown = st.number_input("Độ sâu cắt mỗi lượt (mm)", value=3.0, step=0.5, key="l3_sd")
-            with c2:
-                tab_width = st.number_input("Chiều rộng Tab giữ (mm)", value=8.0, step=1.0, key="tab_w")
-                tab_height = st.number_input("Chiều cao Tab giữ (mm)", value=4.0, step=0.5, key="tab_h")
-            with c3:
-                tab_count = st.number_input("Số lượng Tab quanh chu vi", value=4, min_value=2, max_value=12, key="tab_c")
-                l3_feed = st.number_input("Tốc độ cắt F (mm/min)", value=1200, step=100, key="l3_feed")
-            with c4:
-                l3_rpm = st.number_input("Tốc độ S (RPM)", value=16000, step=1000, key="l3_rpm")
-                st.info(f"Tổng độ sâu cắt biên: {board_z} mm ({math.ceil(board_z/l3_stepdown)} lượt cắt)")
-            
-            if st.button("⚙️ Sinh G-Code Layer 3", key="btn_g3"):
-                gcode_l3 = generate_cutout_gcode(
-                    stock_w, stock_h, board_z, l3_tool_dia, l3_stepdown,
-                    l3_feed, l3_rpm, z_safe, tab_width, tab_height, tab_count,
-                    off_x=offset_x, off_y=offset_y
-                )
-                st.download_button(
-                    label="📥 Tải G-Code Layer 3 (Layer3_Cutout_Tabs.nc)",
-                    data=gcode_l3,
-                    file_name="Layer3_Cutout_Tabs.nc",
-                    mime="text/plain"
-                )
-
-with tab_3d:
-    st.subheader("3. Mô Phỏng Chi Tiết Gia Công Nằm Trong Tấm Ván")
-    st.write(f"**Khổ ván gỗ tổng:** {board_w} x {board_h} x {board_z} mm | **Phôi gia công:** {stock_w} x {stock_h} x {target_depth} mm")
-    
-    scale = 0.5
-    svg_w = int(board_w * scale)
-    svg_h = int(board_h * scale)
-    
-    sx = int(offset_x * scale)
-    sy = int(offset_y * scale)
-    sw = int(stock_w * scale)
-    sh = int(stock_h * scale)
-    
-    svg_content = f"""
-    <svg width="{svg_w}" height="{svg_h}" style="background-color: #D2B48C; border: 3px solid #8B4513; border-radius: 8px;">
-        <defs>
-            <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
-                <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#C19A6B" stroke-width="0.5"/>
-            </pattern>
-        </defs>
-        <rect width="100%" height="100%" fill="url(#grid)" />
-        <rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" fill="#A0522D" stroke="#5C2C16" stroke-width="2" rx="4" opacity="0.85"/>
-        <circle cx="{sx}" cy="{sy}" r="6" fill="#FF0000" />
-        <line x1="{sx}" y1="{sy}" x2="{sx + 30}" y2="{sy}" stroke="#FF0000" stroke-width="2" />
-        <line x1="{sx}" y1="{sy}" x2="{sx}" y2="{sy + 30}" stroke="#00FF00" stroke-width="2" />
-        <text x="{sx + 8}" y="{sy - 8}" fill="#000000" font-weight="bold" font-size="12">G54 Work Zero (X{offset_x}, Y{offset_y})</text>
-        <rect x="{sx + sw/2 - 10}" y="{sy - 2}" width="20" height="4" fill="#00FF00" />
-        <rect x="{sx + sw/2 - 10}" y="{sy + sh - 2}" width="20" height="4" fill="#00FF00" />
-        <rect x="{sx - 2}" y="{sy + sh/2 - 10}" width="4" height="20" fill="#00FF00" />
-        <rect x="{sx + sw - 2}" y="{sy + sh/2 - 10}" width="4" height="20" fill="#00FF00" />
-        <text x="{sx + 10}" y="{sy + 25}" fill="#FFFFFF" font-size="14" font-weight="bold">Tranh Khắc CNC ({stock_w}x{stock_h}mm)</text>
-        <text x="10" y="{svg_h - 10}" fill="#3D2314" font-size="12">Tấm Ván Tổng: {board_w} x {board_h} mm</text>
-    </svg>
-    """
-    
-    st.components.v1.html(svg_content, height=svg_h + 30)
-    
-    st.markdown("""
-    **💡 Chú thích trực quan Dashboard:**
-    - 🟫 **Vùng màu nâu vàng ngoài:** Tấm ván nguyên khổ ($1200 \\times 800$ mm).
-    - 🟧 **Khu vực phôi khắc 3D:** Vị trí bức tranh đặt trong tấm ván ($300 \\times 400$ mm).
-    - 🔴 **Điểm đỏ (G54):** Mốc tọa độ X0, Y0, Z0 cài đặt trên Universal Gcode Sender (UGS).
-    - 🟢 **Vạch xanh lá:** Vị trí các cầu giữ phôi (Tabs) chống rơi/văng phôi sau khi cắt đứt.
-    """)
+else:
+    st.info("👋 Vui lòng tải lên ảnh tranh gỗ ở ô trên để bắt đầu quy trình.")
