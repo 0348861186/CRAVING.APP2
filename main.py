@@ -1,7 +1,7 @@
-import Streamlit as st
-Import numpy as np
-Import cv2
-From PIL import Image
+import streamlit as st
+import numpy as np
+import cv2
+from PIL import Image
 Import io
 Import zipfile
 
