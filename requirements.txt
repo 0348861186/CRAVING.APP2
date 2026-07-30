@@ -1,8 +1,5 @@
-streamlit>=1.30.0
+streamlit
 numpy
 opencv-python-headless
 pillow
-torch
-torchvision
-onnxruntime>=1.16.0
-requests
+matplotlib
