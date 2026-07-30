@@ -5,3 +5,4 @@ pillow
 matplotlib
 trimesh
 scipy
+google-genai
