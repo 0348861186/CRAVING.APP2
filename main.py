@@ -2,8 +2,8 @@ import streamlit as st
 import numpy as np
 import cv2
 from PIL import Image
-Import io
-Import zipfile
+import io
+import zipfile
 
 # ==============================================================================
 # CẤU HÌNH TRANG WEB
