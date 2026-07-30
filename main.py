@@ -173,8 +173,7 @@ if uploaded_file is not None:
 
     with col3:
         st.markdown("**3. AI Phân tích đối tượng**")
-        st.image(segmented_img, use_container_width=True, cmap="gray")
-
+        st.image(segmented_img, use_container_width=True)
     with col4:
         st.markdown("**4. AI 3D Depth Map**")
         # Hiển thị depth map dưới dạng heatmap relief
