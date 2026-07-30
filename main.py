@@ -1,43 +1,45 @@
 import streamlit as st
+
+# ---------------------------------------------------------
+# CẤU HÌNH TRANG STREAMLIT - BẮT BUỘC ĐẶT Ở ĐẦU FILE
+# ---------------------------------------------------------
+try:
+    st.set_page_config(
+        page_title="CAM 3D Relief Generator for CNC",
+        page_layout="wide",
+        initial_sidebar_state="expanded"
+    )
+except Exception:
+    pass  # Bỏ qua nếu cấu hình đã được khởi tạo trước đó
+
+# ---------------------------------------------------------
+# IMPORT CÁC THƯ VIỆN KHÁC
+# ---------------------------------------------------------
 import numpy as np
 import cv2
 from PIL import Image
-import io
 import trimesh
 import matplotlib.pyplot as plt
 
-# =========================================================
-# QUY TẮC BẮT BUỘC STREAMLIT:
-# st.set_page_config PHẢI LÀ LỆNH ST.* ĐẦU TIÊN
-# =========================================================
-st.set_page_config(
-    page_title="CAM 3D Relief Generator for CNC",
-    page_layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# =========================================================
-# GIAO DIỆN CHÍNH (HEADER)
-# =========================================================
+# ---------------------------------------------------------
+# TIÊU ĐỀ ỨNG DỤNG
+# ---------------------------------------------------------
 st.title("🖼️ Phần Mềm Khắc Tranh 3D & Tạo G-Code CNC")
 st.caption("Giải pháp CAD/CAM 3D Relief tối ưu cho Streamlit Cloud")
 
-# =========================================================
+# ---------------------------------------------------------
 # HÀM BỔ TRỢ (HELPER FUNCTIONS)
-# =========================================================
+# ---------------------------------------------------------
 def depth_map_to_mesh(depth_img, width_mm, height_mm, max_depth_mm):
     """Chuyển đổi Depth Map 2D thành Mô hình Mesh 3D Surface"""
     h, w = depth_img.shape
-    # Normalize về khoảng [0, 1]
     norm_depth = (depth_img - depth_img.min()) / (depth_img.max() - depth_img.min() + 1e-6)
     
-    # Tạo lưới tọa độ X, Y, Z
     x = np.linspace(0, width_mm, w)
     y = np.linspace(0, height_mm, h)
     x_grid, y_grid = np.meshgrid(x, y)
     z_grid = norm_depth * max_depth_mm
 
-    # Tạo Vertices và Faces cho Trimesh
     vertices = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel()))
     
     faces = []
@@ -81,18 +83,18 @@ def generate_raster_gcode(x_grid, y_grid, z_grid, step_over_mm, feed_rate, safe_
     gcode.append("M30 (Ket thuc chuong trinh)")
     return "\n".join(gcode)
 
-# =========================================================
-# SIDEBAR: CẤU HÌNH KÍCH THƯỚC VÀ ĐỘ SÂU
-# =========================================================
+# ---------------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------------
 st.sidebar.header("⚙️ 1. Cấu hình Kích thước Tranh")
 width_mm = st.sidebar.number_input("Chiều rộng tranh (X - mm)", value=300, step=10)
 height_mm = st.sidebar.number_input("Chiều cao tranh (Y - mm)", value=400, step=10)
 max_depth_mm = st.sidebar.slider("Độ sâu phù điêu (Z - mm)", min_value=3.0, max_value=50.0, value=15.0, step=0.5)
 safe_z = st.sidebar.number_input("Chiều cao an toàn Z (Safe Z - mm)", value=10.0)
 
-# =========================================================
-# BẢNG ĐIỀU KHIỂN MAIN DASHBOARD (CÁC TAB QUY TRÌNH)
-# =========================================================
+# ---------------------------------------------------------
+# MAIN DASHBOARD TABS
+# ---------------------------------------------------------
 tab_img, tab_prep, tab_cam, tab_post = st.tabs([
     "🖼️ Bước A: Xử Lý Ảnh & Depth Map",
     "📐 Bước 1: Chuẩn Bị Mẫu 3D",
@@ -100,22 +102,18 @@ tab_img, tab_prep, tab_cam, tab_post = st.tabs([
     "🪵 Bước 7: Xuất G-Code & Xử Lý Sau Phay"
 ])
 
-# ---------------------------------------------------------
-# TAB A: XỬ LÝ ẢNH & NÂNG CẤP DEPTH MAP
-# ---------------------------------------------------------
+# TAB A
 with tab_img:
     st.subheader("Tiền xử lý ảnh gốc & Tạo Depth Map (Height Map)")
-    
     uploaded_img = st.file_uploader("Tải lên ảnh mẫu (JPG, PNG)", type=["jpg", "jpeg", "png"])
     
     if uploaded_img:
         col1, col2, col3 = st.columns(3)
-        img_raw = Image.open(uploaded_img).convert("L") # GreyScale
+        img_raw = Image.open(uploaded_img).convert("L")
         
         with col1:
             st.image(img_raw, caption="1. Ảnh Gốc Grayscale", use_column_width=True)
             
-        # Xử lý nâng cao ảnh (Image Enhancement - CLAHE)
         img_np = np.array(img_raw)
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         enhanced_img = clahe.apply(img_np)
@@ -123,33 +121,25 @@ with tab_img:
         with col2:
             st.image(enhanced_img, caption="2. Nâng tương phản (CLAHE)", use_column_width=True)
             
-        # Tùy chỉnh Độ nhám / Smooth để mịn mặt tranh
         blur_val = st.slider("Khử nhiễu bề mặt (Gaussian Blur)", 1, 15, 3, step=2)
         final_depth = cv2.GaussianBlur(enhanced_img, (blur_val, blur_val), 0)
         
         with col3:
             st.image(final_depth, caption="3. Depth Map Chuẩn (Height Map)", use_column_width=True)
             
-        # Lưu trữ trạng thái bộ nhớ tạm Streamlit
         st.session_state['depth_map'] = final_depth
 
-# ---------------------------------------------------------
-# TAB 1: CHUẨN BỊ MẪU 3D (RELIEF)
-# ---------------------------------------------------------
+# TAB 1
 with tab_prep:
     st.subheader("Khởi tạo & Xem Trước Mô Hình Phù Điêu 3D (Relief)")
-    
     if 'depth_map' in st.session_state:
         depth_img = st.session_state['depth_map']
-        
-        # Tạo Mesh 3D Surface
         mesh, x_g, y_g, z_g = depth_map_to_mesh(depth_img, width_mm, height_mm, max_depth_mm)
         st.session_state['x_g'] = x_g
         st.session_state['y_g'] = y_g
         st.session_state['z_g'] = z_g
         
         col_meta, col_vis = st.columns([1, 2])
-        
         with col_meta:
             st.success("✅ Tạo Mesh 3D Thành Công!")
             st.metric("Số Lượng Đỉnh (Vertices)", f"{len(mesh.vertices):,}")
@@ -157,11 +147,8 @@ with tab_prep:
             st.metric("Kích Thước Khối (X x Y x Z)", f"{width_mm} x {height_mm} x {max_depth_mm} mm")
             
         with col_vis:
-            # Render Matplotlib 3D Surface
             fig = plt.figure(figsize=(8, 5))
             ax = fig.add_subplot(111, projection='3d')
-            
-            # Giảm stride để không bị treo bộ nhớ Cloud
             stride = max(1, int(depth_img.shape[0] / 100))
             surf = ax.plot_surface(x_g[::stride, ::stride], 
                                    y_g[::stride, ::stride], 
@@ -173,15 +160,10 @@ with tab_prep:
     else:
         st.warning("⚠️ Vui lòng tải và xử lý ảnh ở Bước A trước!")
 
-# ---------------------------------------------------------
-# TAB 2-6: THIẾT LẬP THÔNG SỐ CÁC LỚP DAO (CAM TOOLPATHS)
-# ---------------------------------------------------------
+# TAB CAM
 with tab_cam:
     st.subheader("Cấu hình Lập Trình Dao Gia Công Nhiều Lớp")
-    
     if 'z_g' in st.session_state:
-        st.markdown("### 🪓 Chọn Chiến Lược Gia Công & Tham Số Dao")
-        
         step_tab1, step_tab2, step_tab3, step_tab4 = st.tabs([
             "Bước 2: Phay Phá Thô (Roughing)",
             "Bước 3: Phay Bán Tinh (Semi-Finishing)",
@@ -190,44 +172,33 @@ with tab_cam:
         ])
         
         with step_tab1:
-            st.markdown("**Mục tiêu:** Lấy nhanh phần gỗ dư bằng dao lớn")
             tool_r_dia = st.selectbox("Đường kính dao phá (Ø mm)", [12.0, 10.0, 8.0, 6.0], index=2, key="r_dia")
             step_down_r = st.number_input("Step down (Độ sâu mỗi lát cắt - mm)", value=4.0, key="r_sd")
             step_over_r = st.slider("Step over phá thô (%)", 30, 70, 50, key="r_so")
             feed_r = st.number_input("Tốc độ cắt F (mm/min)", value=3000, key="r_f")
             
         with step_tab2:
-            st.markdown("**Mục tiêu:** Giảm dư lượng vật liệu, chuẩn bị cho dao tinh")
             tool_sf_dia = st.selectbox("Đường kính dao bán tinh (Ø mm)", [6.0, 4.0, 3.0], index=1, key="sf_dia")
             step_over_sf = st.slider("Step over bán tinh (%)", 10, 30, 15, key="sf_so")
             feed_sf = st.number_input("Tốc độ cắt F bán tinh (mm/min)", value=2500, key="sf_f")
             
         with step_tab3:
-            st.markdown("**Mục tiêu:** Mịn bề mặt, nổi bật vảy cá, tóc, nếp áo")
             tool_f_dia = st.selectbox("Đường kính dao cầu tinh (Ø mm)", [3.0, 2.0, 1.5, 1.0], index=1, key="f_dia")
             step_over_f = st.slider("Step over tinh (%)", 5, 15, 8, key="f_so")
-            pattern = st.selectbox("Kiểu chạy dao", ["Parallel (Raster Ziczac)", "Offset", "3D Contour"], key="f_pat")
             feed_f = st.number_input("Tốc độ cắt F tinh (mm/min)", value=2000, key="f_f")
             
         with step_tab4:
-            st.markdown("**Mục tiêu:** Khắc mắt, râu, chữ nổi và cắt đứt viền tranh")
             vbit_angle = st.selectbox("Góc dao V-Bit khắc chi tiết", ["30°", "60°", "90°"], key="vbit")
             profile_tool = st.number_input("Đường kính dao cắt biên Endmill (mm)", value=6.0, key="prof_dia")
-            
     else:
         st.warning("⚠️ Chưa có dữ liệu Mesh 3D. Hãy hoàn tất Bước 1.")
 
-# ---------------------------------------------------------
-# TAB 7: XUẤT G-CODE VÀ HƯỚNG DẪN XỬ LÝ SAU PHAY
-# ---------------------------------------------------------
+# TAB POST
 with tab_post:
     st.subheader("Xuất Mã G-Code & Quy Trình Hoàn Thiện Tranh")
-    
     col_gcode, col_guide = st.columns([1, 1])
     
     with col_gcode:
-        st.markdown("### 📥 Xuất File G-Code Gia Công")
-        
         if 'z_g' in st.session_state:
             x_g = st.session_state['x_g']
             y_g = st.session_state['y_g']
@@ -236,7 +207,6 @@ with tab_post:
             pass_type = st.radio("Chọn lớp xuất G-Code:", ["Phá Thô (Roughing)", "Phay Tinh (Finishing)"])
             
             if st.button("🚀 Tiến Hành Biến Đổi & Tạo G-Code"):
-                # Lấy tham số theo lưỡi dao đã chọn
                 if pass_type == "Phay Tinh (Finishing)":
                     t_dia = st.session_state.get('f_dia', 2.0)
                     s_so = st.session_state.get('f_so', 8)
@@ -247,11 +217,9 @@ with tab_post:
                     f_feed = st.session_state.get('r_f', 3000)
                     
                 step_over_mm = t_dia * (s_so / 100.0)
-                
                 gcode_txt = generate_raster_gcode(x_g, y_g, z_g, step_over_mm, f_feed, safe_z, t_dia)
                 
-                st.text_area("Xem trước mã G-Code (Chỉ hiển thị đoạn đầu):", gcode_txt[:1000] + "\n\n...[Mã G-Code hoàn chỉnh sẵn sàng tải xuống]...", height=200)
-                
+                st.text_area("Xem trước mã G-Code:", gcode_txt[:1000] + "\n\n...[Mã G-Code hoàn chỉnh]...", height=200)
                 st.download_button(
                     label="💾 Tải File G-Code (.nc)",
                     data=gcode_txt,
@@ -266,8 +234,6 @@ with tab_post:
         st.info("""
         1. **Chà nhám (Sanding):** Dùng giấy nhám dẻo/nhám chổi (độ hạt P180 -> P240 -> P320) chà nhẹ các khe sâu và chân xơ gỗ.
         2. **Làm sạch:** Dùng vòi xịt khí nén làm sạch toàn bộ bụi gỗ bám trong chi tiết tranh.
-        3. **Sơn lót & Sơn màu:**
-           - Phun 1-2 lớp sơn lót NC/PU để khóa nhựa gỗ.
-           - Phun màu dạt, lau màu (Wood Stain) để làm nổi bật độ sâu hiệu ứng 3D Highlight.
-        4. **Phủ PU / Dát vàng:** Phủ PU mờ (30% hoặc 50%) bảo vệ bề mặt. Dát vàng điểm xuyết ở các chi tiết chữ nổi, hoa văn nếu là dòng tranh cao cấp.
+        3. **Sơn lót & Sơn màu:** Phun 1-2 lớp sơn lót NC/PU để khóa nhựa gỗ, lau màu (Wood Stain) tạo độ sâu 3D.
+        4. **Phủ PU / Dát vàng:** Phủ PU mờ bảo vệ bề mặt hoặc dát vàng các điểm nhấn.
         """)
