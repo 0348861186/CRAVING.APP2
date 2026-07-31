@@ -2,8 +2,8 @@ streamlit
 numpy<2.0.0
 pillow
 opencv-python-headless
-torch --extra-index-url https://download.pytorch.org/whl/cpu
-torchvision --extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
 rembg
 transformers
 plotly
