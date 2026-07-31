@@ -3,7 +3,6 @@ opencv-python-headless
 numpy
 Pillow
 torch
+rembg
 transformers
 plotly
-rembg
-onnxruntime
