@@ -1,14 +1,14 @@
-import streamlit as st
+import io
 import cv2
 import numpy as np
 from PIL import Image
-import io
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rembg import remove
 from transformers import pipeline
 import plotly.graph_objects as go
+import streamlit as st
 
 # ==============================================================================
 # 1. KIẾN TRÚC REAL-ESRGAN (RRDBNET) & THUẬT TOÁN CHIA TILE
@@ -114,9 +114,9 @@ def enhance_tile_process(img_np, model, device, tile_size=400, tile_pad=10, scal
     return (output_np * 255.0).round().astype(np.uint8)
 
 # ==============================================================================
-# 2. KHỞI TẠO VA CACHE MÔ HÌNH AI
+# 2. KHỞI TẠO VÀ CACHE MÔ HÌNH AI
 # ==============================================================================
-st.set_page_config(page_title="AI Ultra 3D CNC - Aspire Optimization", layout="wide")
+st.set_page_config(page_title="AI Ultra 3D CNC - Aspire Optimization 16-Bit", layout="wide")
 
 @st.cache_resource
 def load_real_esrgan_model():
@@ -138,18 +138,18 @@ def load_depth_model():
 # ==============================================================================
 # 3. HÀM XỬ LÝ HÌNH ẢNH & NORMAL MAP
 # ==============================================================================
-def generate_normal_map(depth_img, strength=1.5):
-    depth_float = depth_img.astype(np.float32) / 255.0
-    zy, zx = np.gradient(depth_float)
+def generate_normal_map(depth_float_norm, strength=1.5):
+    """Tạo Normal Map từ mảng depth chuẩn hóa float32 [0, 1]"""
+    zy, zx = np.gradient(depth_float_norm)
     zx, zy = zx * strength, zy * strength
-    normal = np.dstack((-zx, -zy, np.ones_like(depth_float)))
+    normal = np.dstack((-zx, -zy, np.ones_like(depth_float_norm)))
     n = np.linalg.norm(normal, axis=2, keepdims=True)
     return ((normal / n + 1) / 2.0 * 255).astype(np.uint8)
 
 # ==============================================================================
 # 4. GIAO DIỆN STREAMLIT
 # ==============================================================================
-st.title("🛠️ Tool Tối Ưu Ảnh AI 3D CNC Pro (Aspire Compatible)")
+st.title("🛠️ Tool Tối Ưu Ảnh AI 3D CNC Pro (Xuất 16-Bit Cho Aspire)")
 
 # Sidebar Configuration
 st.sidebar.header("⚙️ Tùy chỉnh tham số AI & CNC")
@@ -162,8 +162,8 @@ st.sidebar.subheader("📐 Tối ưu Height Map & Lọc bề mặt")
 use_denoise = st.sidebar.checkbox("Bật AI Denoise (Khử hạt nhiễu)", value=True)
 denoise_strength = st.sidebar.slider("Cường độ Denoise", 3, 20, 7)
 blur_strength = st.sidebar.slider("Độ mịn bề mặt (Bilateral Filter)", 1, 15, 5, step=2)
-sharpen_strength = st.sidebar.slider("Độ sắc nét biên dạng (Unsharp)", 0.5, 3.0, 1.2, step=0.1)
-contrast = st.sidebar.slider("Tương phản khối (Contrast)", 0.8, 2.5, 1.2, step=0.1)
+gamma_val = st.sidebar.slider("Độ dốc khối (Gamma Curved)", 0.3, 2.5, 1.0, step=0.1)
+invert_z = st.sidebar.checkbox("🔄 Đảo ngược chiều Z (Invert Lồi/Lõm)", value=False)
 normal_strength = st.sidebar.slider("Độ sâu Normal Map", 0.5, 5.0, 1.5, step=0.1)
 
 uploaded_file = st.file_uploader("Tải ảnh từ khách hàng (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
@@ -177,7 +177,7 @@ if uploaded_file is not None:
         st.image(image_input, use_container_width=True)
         st.caption(f"Kích thước gốc: {image_input.width} x {image_input.height} px")
 
-    with st.spinner("🚀 AI đang xử lý (Upscale Tile, Depth Estimation & Filtering)..."):
+    with st.spinner("🚀 AI đang xử lý (Upscale Tile, Depth Anything 16-Bit & Filtering)..."):
         # 1. Tách nền (nếu bật)
         alpha_mask = None
         if remove_bg:
@@ -207,36 +207,53 @@ if uploaded_file is not None:
         if use_ai_depth:
             depth_pipe = load_depth_model()
             depth_pil = depth_pipe(Image.fromarray(upscaled_np))["depth"]
-            depth_np = np.array(depth_pil)
+            depth_raw = np.array(depth_pil, dtype=np.float32)
         else:
-            depth_np = cv2.cvtColor(upscaled_np, cv2.COLOR_RGB2GRAY)
+            depth_raw = cv2.cvtColor(upscaled_np, cv2.COLOR_RGB2GRAY).astype(np.float32)
 
-        # Rescale mask nền nếu có
+        # 5. Chuẩn hóa dải float32 [0.0, 1.0]
+        d_min, d_max = depth_raw.min(), depth_raw.max()
+        if d_max - d_min > 0:
+            depth_norm = (depth_raw - d_min) / (d_max - d_min)
+        else:
+            depth_norm = np.zeros_like(depth_raw, dtype=np.float32)
+
+        # Đảo chiều Z nếu chọn
+        if invert_z:
+            depth_norm = 1.0 - depth_norm
+
+        # Gamma Correction
+        if gamma_val != 1.0:
+            depth_norm = np.power(depth_norm, gamma_val)
+
+        # Áp dụng Mask loại bỏ nền tuyệt đối nếu có
         if alpha_mask is not None:
-            mask_resized = cv2.resize(alpha_mask, (depth_np.shape[1], depth_np.shape[0]))
-            depth_np = cv2.bitwise_and(depth_np, depth_np, mask=mask_resized)
+            mask_resized = cv2.resize(alpha_mask, (depth_norm.shape[1], depth_norm.shape[0]))
+            depth_norm[mask_resized == 0] = 0.0
 
-        # 5. Lọc mịn bề mặt gỗ & Tăng nét chi tiết
-        depth_np = cv2.bilateralFilter(depth_np, d=blur_strength, sigmaColor=75, sigmaSpace=75)
-        depth_np = cv2.convertScaleAbs(depth_np, alpha=contrast, beta=0)
+        # 6. Chuyển sang dải 16-bit (0 -> 65535) & Lọc mịn Bilateral Filter
+        depth_16bit_f = depth_norm * 65535.0
+        smoothed = cv2.bilateralFilter(depth_16bit_f.astype(np.float32), d=blur_strength, sigmaColor=75, sigmaSpace=75)
 
-        # Unsharp Masking
-        blur_gb = cv2.GaussianBlur(depth_np, (0, 0), 3)
-        depth_np = cv2.addWeighted(depth_np, 1 + sharpen_strength, blur_gb, -sharpen_strength, 0)
-        
-        # Standard Normalization 0-255
-        depth_np = cv2.normalize(depth_np, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        if alpha_mask is not None:
+            smoothed[mask_resized == 0] = 0.0
 
-        # 6. Tạo Normal Map
-        normal_np = generate_normal_map(depth_np, strength=normal_strength)
+        final_depth_16bit = np.clip(smoothed, 0, 65535).astype(np.uint16)
 
-        depth_img = Image.fromarray(depth_np)
+        # 7. Tạo Normal Map từ dải depth_norm
+        normal_np = generate_normal_map(depth_norm, strength=normal_strength)
+
+        # Tạo đối tượng ảnh 16-bit PIL để lưu file
+        depth_img_16bit = Image.fromarray(final_depth_16bit, mode="I;16")
         normal_img = Image.fromarray(normal_np)
 
+        # Mẫu 8-bit phục vụ hiển thị preview mượt trên web
+        preview_8bit = (final_depth_16bit / 256).astype(np.uint8)
+
     with col2:
-        st.subheader("✨ AI Depth Map (Chuẩn 3D Relief)")
-        st.image(depth_img, use_container_width=True)
-        st.caption(f"Kích thước sau xử lý: {depth_img.width} x {depth_img.height} px")
+        st.subheader("✨ AI Depth Map 16-Bit (Chuẩn Aspire Relief)")
+        st.image(preview_8bit, use_container_width=True)
+        st.caption(f"Kích thước sau xử lý: {depth_img_16bit.width} x {depth_img_16bit.height} px (Dải độ sâu 65,536 mức)")
 
     st.markdown("---")
     st.subheader("🗺️ Normal Map (Kiểm tra góc dốc đường đục)")
@@ -246,13 +263,13 @@ if uploaded_file is not None:
     st.markdown("---")
     st.subheader("🧊 Mô phỏng xem trước Relief 3D")
     preview_size = 200
-    depth_small = cv2.resize(depth_np, (preview_size, preview_size))
+    depth_small = cv2.resize(final_depth_16bit, (preview_size, preview_size)).astype(np.float32) / 65535.0
     x = np.linspace(0, 1, preview_size)
     y = np.linspace(0, 1, preview_size)
     X, Y = np.meshgrid(x, y)
-    Z = depth_small.astype(np.float32) / 255.0
+    Z = np.flipud(depth_small)
 
-    fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='gray')])
+    fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Earth')])
     fig.update_layout(
         title='Mô hình 3D Relief (Dùng chuột xoay/phóng to để kiểm tra độ nông sâu)',
         autosize=False, width=800, height=600,
@@ -261,13 +278,23 @@ if uploaded_file is not None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Nút Tải
+    # Nút Tải File
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
         buf_depth = io.BytesIO()
-        depth_img.save(buf_depth, format="PNG")
-        st.download_button("💾 Tải Depth Map (PNG HQ)", data=buf_depth.getvalue(), file_name="cnc_ai_depthmap.png", mime="image/png")
+        depth_img_16bit.save(buf_depth, format="PNG")
+        st.download_button(
+            "💾 Tải Depth Map 16-Bit (.PNG cho Aspire)",
+            data=buf_depth.getvalue(),
+            file_name="cnc_ai_depthmap_16bit.png",
+            mime="image/png"
+        )
     with col_dl2:
         buf_normal = io.BytesIO()
         normal_img.save(buf_normal, format="PNG")
-        st.download_button("💾 Tải Normal Map (PNG HQ)", data=buf_normal.getvalue(), file_name="cnc_ai_normalmap.png", mime="image/png")
+        st.download_button(
+            "💾 Tải Normal Map (PNG HQ)",
+            data=buf_normal.getvalue(),
+            file_name="cnc_ai_normalmap.png",
+            mime="image/png"
+        )
