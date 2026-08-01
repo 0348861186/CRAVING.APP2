@@ -1,5 +1,4 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
-
 streamlit
 torch
 torchvision
@@ -11,4 +10,3 @@ transformers
 plotly
 accelerate
 huggingface_hub
-urllib3<2.0.0
