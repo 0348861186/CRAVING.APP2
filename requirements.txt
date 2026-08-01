@@ -1,8 +1,11 @@
-streamlit>=1.40.0
+streamlit
+torch
+torchvision
 opencv-python-headless
 numpy
-Pillow
-torch
+pillow
 rembg
 transformers
 plotly
+accelerate
+huggingface_hub
