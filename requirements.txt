@@ -1,11 +1,12 @@
-streamlit
-torch
-torchvision
+streamlit>=1.30.0
+torch--extra-index-url https://download.pytorch.org/whl/cpu
+torchvision--extra-index-url https://download.pytorch.org/whl/cpu
 opencv-python-headless
-numpy
+numpy<2.0.0
 pillow
 rembg
 transformers
 plotly
 accelerate
 huggingface_hub
+urllib3<2.0.0
