@@ -5,13 +5,12 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from rembg import remove
 from transformers import pipeline
 import plotly.graph_objects as go
 import streamlit as st
 
-# Tối ưu hóa Torch cho CPU trên Streamlit Cloud
-torch.set_num_threads(2)
+# Tối ưu hóa giới hạn CPU để tránh bị Streamlit Cloud Throttle
+torch.set_num_threads(1)
 
 # ==============================================================================
 # 1. KIẾN TRÚC REAL-ESRGAN (RRDBNET) & THUẬT TOÁN CHIA TILE
@@ -67,8 +66,8 @@ class RRDBNet(nn.Module):
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out
 
-def enhance_tile_process(img_np, model, device, tile_size=250, tile_pad=10, scale=4):
-    """Cắt tile nhỏ (250px) để chống tràn RAM trên Streamlit Cloud"""
+def enhance_tile_process(img_np, model, device, tile_size=200, tile_pad=10, scale=4):
+    """Cắt tile nhỏ 200px để chống tràn VRAM/RAM"""
     img_tensor = torch.from_numpy(np.transpose(img_np, (2, 0, 1))).float() / 255.0
     img_tensor = img_tensor.unsqueeze(0).to(device)
 
@@ -153,7 +152,7 @@ st.title("🛠️ Tool Tối Ưu Ảnh AI 3D CNC Pro (Xuất 16-Bit Cho Aspire)"
 
 # Sidebar Configuration
 st.sidebar.header("⚙️ Tùy chỉnh tham số AI & CNC")
-use_esrgan = st.sidebar.checkbox("Bật AI Super-Resolution (Real-ESRGAN 4x)", value=False) # Mặc định tắt để load nhanh
+use_esrgan = st.sidebar.checkbox("Bật AI Super-Resolution (Real-ESRGAN 4x)", value=False)
 remove_bg = st.sidebar.checkbox("Tách loại bỏ nền tự động (Rembg)", value=False)
 use_ai_depth = st.sidebar.checkbox("Bật AI Depth Estimation (Depth Anything 3D)", value=True)
 
@@ -178,14 +177,19 @@ if uploaded_file is not None:
         st.caption(f"Kích thước gốc: {image_input.width} x {image_input.height} px")
 
     with st.spinner("🚀 AI đang xử lý (Depth Anything 16-Bit & Filtering)..."):
-        # 1. Tách nền (nếu bật)
+        # 1. Tách nền (Nạp chậm Lazy Loading rembg để tránh sập app)
         alpha_mask = None
         if remove_bg:
-            img_no_bg = remove(image_input)
-            img_np_bg = np.array(img_no_bg)
-            if img_np_bg.shape[2] == 4:
-                alpha_mask = img_np_bg[:, :, 3]
-            image_proc = img_no_bg.convert("RGB")
+            try:
+                from rembg import remove as rembg_remove
+                img_no_bg = rembg_remove(image_input)
+                img_np_bg = np.array(img_no_bg)
+                if img_np_bg.shape[2] == 4:
+                    alpha_mask = img_np_bg[:, :, 3]
+                image_proc = img_no_bg.convert("RGB")
+            except Exception as e:
+                st.warning("Không thể khởi chạy Rembg do giới hạn RAM. Đang chuyển sang xử lý mặc định.")
+                image_proc = image_input
         else:
             image_proc = image_input
 
@@ -193,7 +197,7 @@ if uploaded_file is not None:
         img_np = np.array(image_proc)
         if use_esrgan:
             esr_model, device = load_real_esrgan_model()
-            upscaled_np = enhance_tile_process(img_np, esr_model, device, tile_size=250, scale=4)
+            upscaled_np = enhance_tile_process(img_np, esr_model, device, tile_size=200, scale=4)
         else:
             upscaled_np = img_np
 
@@ -257,7 +261,7 @@ if uploaded_file is not None:
     # 3D Interactive Preview
     st.markdown("---")
     st.subheader("🧊 Mô phỏng xem trước Relief 3D")
-    preview_size = 150
+    preview_size = 120
     depth_small = cv2.resize(final_depth_16bit, (preview_size, preview_size)).astype(np.float32) / 65535.0
     x = np.linspace(0, 1, preview_size)
     y = np.linspace(0, 1, preview_size)
@@ -267,7 +271,7 @@ if uploaded_file is not None:
     fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Earth')])
     fig.update_layout(
         title='Mô hình 3D Relief',
-        autosize=False, width=800, height=500,
+        autosize=False, width=700, height=450,
         margin=dict(l=10, r=10, b=10, t=40),
         scene=dict(zaxis=dict(range=[0, 1]))
     )
