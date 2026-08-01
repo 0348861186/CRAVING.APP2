@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ==============================================================================
-# 1. KIẾN TRÚC REAL-ESRGAN (RRDBNET) & THUẬT TOÁN CHIA TILE TỐI ƯU VRAM
+# 1. KIẾN TRÚC REAL-ESRGAN (RRDBNET) & THUẬT TOÁN CHIA TILE
 # ==============================================================================
 class ResidualDenseBlock_5C(nn.Module):
     def __init__(self, nf=64, gc=32, bias=True):
@@ -65,14 +65,13 @@ class RRDBNet(nn.Module):
         return out
 
 def enhance_tile_process(img_np, model, device, tile_size=400, tile_pad=10, scale=4):
-    """Cắt tile xử lý nâng phân giải AI để tránh tràn VRAM GPU"""
+    """Cắt tile xử lý nâng phân giải AI để tránh tràn VRAM/RAM"""
     img_tensor = torch.from_numpy(np.transpose(img_np, (2, 0, 1))).float() / 255.0
     img_tensor = img_tensor.unsqueeze(0).to(device)
 
     b, c, h, w = img_tensor.size()
-    
-    # TỐI ƯU: Khởi tạo Tensor đầu ra trên RAM hệ thống (CPU) thay vì VRAM GPU
-    output = torch.zeros((b, c, h * scale, w * scale), device='cpu')
+    output_shape = (b, c, h * scale, w * scale)
+    output = torch.zeros(output_shape, device=device)
 
     tiles_x = (w + tile_size - 1) // tile_size
     tiles_y = (h + tile_size - 1) // tile_size
@@ -90,7 +89,7 @@ def enhance_tile_process(img_np, model, device, tile_size=400, tile_pad=10, scal
             input_tile = img_tensor[:, :, input_start_y:input_end_y, input_start_x:input_end_x]
 
             with torch.no_grad():
-                output_tile = model(input_tile).cpu() # Đẩy Tile sau khi xử lý về CPU
+                output_tile = model(input_tile)
 
             output_start_x = input_start_x * scale
             output_end_x = input_end_x * scale
@@ -110,7 +109,7 @@ def enhance_tile_process(img_np, model, device, tile_size=400, tile_pad=10, scal
             output[:, :, target_start_y:target_end_y, target_start_x:target_end_x] = \
                 output_tile[:, :, tile_slice_y_start:tile_slice_y_end, tile_slice_x_start:tile_slice_x_end]
 
-    output_np = output.squeeze().float().clamp_(0, 1).numpy()
+    output_np = output.squeeze().float().cpu().clamp_(0, 1).numpy()
     output_np = np.transpose(output_np, (1, 2, 0))
     return (output_np * 255.0).round().astype(np.uint8)
 
@@ -227,24 +226,24 @@ if uploaded_file is not None:
         if gamma_val != 1.0:
             depth_norm = np.power(depth_norm, gamma_val)
 
-        # TỐI ƯU: Áp dụng Mask loại bỏ nền chuẩn xác với Binary Thresholding tránh viền lem
+        # Áp dụng Mask loại bỏ nền tuyệt đối nếu có
         if alpha_mask is not None:
-            mask_resized = cv2.resize(alpha_mask, (depth_norm.shape[1], depth_norm.shape[0]), interpolation=cv2.INTER_AREA)
-            depth_norm[mask_resized < 128] = 0.0
+            mask_resized = cv2.resize(alpha_mask, (depth_norm.shape[1], depth_norm.shape[0]))
+            depth_norm[mask_resized == 0] = 0.0
 
         # 6. Chuyển sang dải 16-bit (0 -> 65535) & Lọc mịn Bilateral Filter
         depth_16bit_f = depth_norm * 65535.0
         smoothed = cv2.bilateralFilter(depth_16bit_f.astype(np.float32), d=blur_strength, sigmaColor=75, sigmaSpace=75)
 
         if alpha_mask is not None:
-            smoothed[mask_resized < 128] = 0.0
+            smoothed[mask_resized == 0] = 0.0
 
         final_depth_16bit = np.clip(smoothed, 0, 65535).astype(np.uint16)
 
         # 7. Tạo Normal Map từ dải depth_norm
         normal_np = generate_normal_map(depth_norm, strength=normal_strength)
 
-        # Tạo đối tượng ảnh 16-bit PIL để lưu file (Format mode I;16 dành riêng cho PNG 16-bit)
+        # Tạo đối tượng ảnh 16-bit PIL để lưu file
         depth_img_16bit = Image.fromarray(final_depth_16bit, mode="I;16")
         normal_img = Image.fromarray(normal_np)
 
