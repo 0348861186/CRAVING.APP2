@@ -10,6 +10,9 @@ from transformers import pipeline
 import plotly.graph_objects as go
 import streamlit as st
 
+# Tối ưu hóa Torch cho CPU trên Streamlit Cloud
+torch.set_num_threads(2)
+
 # ==============================================================================
 # 1. KIẾN TRÚC REAL-ESRGAN (RRDBNET) & THUẬT TOÁN CHIA TILE
 # ==============================================================================
@@ -64,8 +67,8 @@ class RRDBNet(nn.Module):
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out
 
-def enhance_tile_process(img_np, model, device, tile_size=400, tile_pad=10, scale=4):
-    """Cắt tile xử lý nâng phân giải AI để tránh tràn VRAM/RAM"""
+def enhance_tile_process(img_np, model, device, tile_size=250, tile_pad=10, scale=4):
+    """Cắt tile nhỏ (250px) để chống tràn RAM trên Streamlit Cloud"""
     img_tensor = torch.from_numpy(np.transpose(img_np, (2, 0, 1))).float() / 255.0
     img_tensor = img_tensor.unsqueeze(0).to(device)
 
@@ -120,26 +123,23 @@ st.set_page_config(page_title="AI Ultra 3D CNC - Aspire Optimization 16-Bit", la
 
 @st.cache_resource
 def load_real_esrgan_model():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
     model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
     checkpoint = torch.hub.load_state_dict_from_url(model_url, map_location=device)
     state_dict = checkpoint.get('params_ema', checkpoint.get('params', checkpoint))
     model.load_state_dict(state_dict, strict=True)
     model.eval()
-    model.to(device)
     return model, device
 
 @st.cache_resource
 def load_depth_model():
-    device = 0 if torch.cuda.is_available() else -1
-    return pipeline(task="depth-estimation", model="LiheYoung/depth-anything-small-hf", device=device)
+    return pipeline(task="depth-estimation", model="LiheYoung/depth-anything-small-hf", device=-1)
 
 # ==============================================================================
 # 3. HÀM XỬ LÝ HÌNH ẢNH & NORMAL MAP
 # ==============================================================================
 def generate_normal_map(depth_float_norm, strength=1.5):
-    """Tạo Normal Map từ mảng depth chuẩn hóa float32 [0, 1]"""
     zy, zx = np.gradient(depth_float_norm)
     zx, zy = zx * strength, zy * strength
     normal = np.dstack((-zx, -zy, np.ones_like(depth_float_norm)))
@@ -153,7 +153,7 @@ st.title("🛠️ Tool Tối Ưu Ảnh AI 3D CNC Pro (Xuất 16-Bit Cho Aspire)"
 
 # Sidebar Configuration
 st.sidebar.header("⚙️ Tùy chỉnh tham số AI & CNC")
-use_esrgan = st.sidebar.checkbox("Bật AI Super-Resolution (Real-ESRGAN 4x)", value=True)
+use_esrgan = st.sidebar.checkbox("Bật AI Super-Resolution (Real-ESRGAN 4x)", value=False) # Mặc định tắt để load nhanh
 remove_bg = st.sidebar.checkbox("Tách loại bỏ nền tự động (Rembg)", value=False)
 use_ai_depth = st.sidebar.checkbox("Bật AI Depth Estimation (Depth Anything 3D)", value=True)
 
@@ -177,7 +177,7 @@ if uploaded_file is not None:
         st.image(image_input, use_container_width=True)
         st.caption(f"Kích thước gốc: {image_input.width} x {image_input.height} px")
 
-    with st.spinner("🚀 AI đang xử lý (Upscale Tile, Depth Anything 16-Bit & Filtering)..."):
+    with st.spinner("🚀 AI đang xử lý (Depth Anything 16-Bit & Filtering)..."):
         # 1. Tách nền (nếu bật)
         alpha_mask = None
         if remove_bg:
@@ -189,21 +189,21 @@ if uploaded_file is not None:
         else:
             image_proc = image_input
 
-        # 2. Upscale Real-ESRGAN với Tiling Chống Tràn RAM
+        # 2. Upscale Real-ESRGAN
         img_np = np.array(image_proc)
         if use_esrgan:
             esr_model, device = load_real_esrgan_model()
-            upscaled_np = enhance_tile_process(img_np, esr_model, device, tile_size=400, scale=4)
+            upscaled_np = enhance_tile_process(img_np, esr_model, device, tile_size=250, scale=4)
         else:
             upscaled_np = img_np
 
-        # 3. Denoise trước khi tạo khối
+        # 3. Denoise
         if use_denoise:
             upscaled_np = cv2.fastNlMeansDenoisingColored(
                 upscaled_np, None, h=denoise_strength, hColor=denoise_strength, templateWindowSize=7, searchWindowSize=21
             )
 
-        # 4. Tạo Depth Map (Mô hình AI chuyên sâu hoặc Chuyển Xám)
+        # 4. Tạo Depth Map
         if use_ai_depth:
             depth_pipe = load_depth_model()
             depth_pil = depth_pipe(Image.fromarray(upscaled_np))["depth"]
@@ -218,20 +218,17 @@ if uploaded_file is not None:
         else:
             depth_norm = np.zeros_like(depth_raw, dtype=np.float32)
 
-        # Đảo chiều Z nếu chọn
         if invert_z:
             depth_norm = 1.0 - depth_norm
 
-        # Gamma Correction
         if gamma_val != 1.0:
             depth_norm = np.power(depth_norm, gamma_val)
 
-        # Áp dụng Mask loại bỏ nền tuyệt đối nếu có
         if alpha_mask is not None:
             mask_resized = cv2.resize(alpha_mask, (depth_norm.shape[1], depth_norm.shape[0]))
             depth_norm[mask_resized == 0] = 0.0
 
-        # 6. Chuyển sang dải 16-bit (0 -> 65535) & Lọc mịn Bilateral Filter
+        # 6. Chuyển sang 16-bit & Lọc mịn
         depth_16bit_f = depth_norm * 65535.0
         smoothed = cv2.bilateralFilter(depth_16bit_f.astype(np.float32), d=blur_strength, sigmaColor=75, sigmaSpace=75)
 
@@ -240,29 +237,27 @@ if uploaded_file is not None:
 
         final_depth_16bit = np.clip(smoothed, 0, 65535).astype(np.uint16)
 
-        # 7. Tạo Normal Map từ dải depth_norm
+        # 7. Normal Map
         normal_np = generate_normal_map(depth_norm, strength=normal_strength)
 
-        # Tạo đối tượng ảnh 16-bit PIL để lưu file
         depth_img_16bit = Image.fromarray(final_depth_16bit, mode="I;16")
         normal_img = Image.fromarray(normal_np)
 
-        # Mẫu 8-bit phục vụ hiển thị preview mượt trên web
         preview_8bit = (final_depth_16bit / 256).astype(np.uint8)
 
     with col2:
         st.subheader("✨ AI Depth Map 16-Bit (Chuẩn Aspire Relief)")
         st.image(preview_8bit, use_container_width=True)
-        st.caption(f"Kích thước sau xử lý: {depth_img_16bit.width} x {depth_img_16bit.height} px (Dải độ sâu 65,536 mức)")
+        st.caption(f"Kích thước sau xử lý: {depth_img_16bit.width} x {depth_img_16bit.height} px")
 
     st.markdown("---")
-    st.subheader("🗺️ Normal Map (Kiểm tra góc dốc đường đục)")
+    st.subheader("🗺️ Normal Map")
     st.image(normal_img, use_container_width=True)
 
     # 3D Interactive Preview
     st.markdown("---")
     st.subheader("🧊 Mô phỏng xem trước Relief 3D")
-    preview_size = 200
+    preview_size = 150
     depth_small = cv2.resize(final_depth_16bit, (preview_size, preview_size)).astype(np.float32) / 65535.0
     x = np.linspace(0, 1, preview_size)
     y = np.linspace(0, 1, preview_size)
@@ -271,8 +266,8 @@ if uploaded_file is not None:
 
     fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Earth')])
     fig.update_layout(
-        title='Mô hình 3D Relief (Dùng chuột xoay/phóng to để kiểm tra độ nông sâu)',
-        autosize=False, width=800, height=600,
+        title='Mô hình 3D Relief',
+        autosize=False, width=800, height=500,
         margin=dict(l=10, r=10, b=10, t=40),
         scene=dict(zaxis=dict(range=[0, 1]))
     )
