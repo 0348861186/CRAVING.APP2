@@ -9,8 +9,6 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 from shapely.geometry import Polygon, LineString, Point, MultiPolygon
-from shapely.affinity import translate, rotate
-from streamlit_sortable import sort_items
 
 # ==============================================================================
 # 1. BÀN CẮT VÀ CHUYỂN ĐỔI GỐC TỌA ĐỘ (WORK ZERO ALIGNMENT)
@@ -44,7 +42,7 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
     return transformed_shapes
 
 # ==============================================================================
-# 2. XỬ LÝ NÂNG CẤP HÌNH HỌC DXF
+# 2. XỬ LÝ HÌNH HỌC DXF
 # ==============================================================================
 def parse_dxf_geometry_v2(file_bytes, filename):
     try:
@@ -111,7 +109,6 @@ def apply_tool_offset(pts, tool_dia, offset_type):
     if len(pts) < 3 or offset_type == "Center":
         return pts
     
-    # Đảm bảo vòng khép kín cho Polygon
     closed_pts = list(pts)
     if closed_pts[0] != closed_pts[-1]:
         closed_pts.append(closed_pts[0])
@@ -214,14 +211,14 @@ def check_safety_and_collisions(shapes, bed_w, bed_h):
         if pts:
             xs, ys = [p[0] for p in pts], [p[1] for p in pts]
             if min(xs) < 0 or max(xs) > bed_w or min(ys) < 0 or max(ys) > bed_h:
-                warnings.append(f"⚠️ Chi tiết '{s['name']}' nằm ngoài/vượt khổ vùng làm việc ({bed_w}x{bed_h}mm).")
+                warnings.append(f"⚠️ Chi tiết '{s['name']}' vượt khổ bàn ({bed_w}x{bed_h}mm).")
 
             if len(pts) >= 3:
                 poly = Polygon(pts)
                 if poly.is_valid:
                     for existing_poly in polygons:
                         if poly.intersects(existing_poly) and not poly.touches(existing_poly):
-                            warnings.append(f"🚨 Phát hiện va chạm/chồng lấp tại '{s['name']}'.")
+                            warnings.append(f"🚨 Phát hiện va chạm tại '{s['name']}'.")
                     polygons.append(poly)
 
     return warnings
@@ -239,7 +236,6 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
 
     lines.append(f"(--- TOOLPATH: {s['name']} | TYPE: {proc_type} ---)")
 
-    # 1. KHOAN (DRILL - G81)
     if proc_type == "Drill" or s["type"] == "CIRCLE":
         cx, cy = s["center"]
         lines.append(f"G0 X{cx:.3f} Y{cy:.3f}")
@@ -247,7 +243,6 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
             lines.append(f"G81 X{cx:.3f} Y{cy:.3f} Z{z:.3f} R2.000 F{plunge}")
         lines.append("G80 (Cancel Drill Cycle)")
 
-    # 2. BÁN KÍNH ARC (G2/G3) - ĐÃ SỬA LỖI CHỈ SỐ Y
     elif s["type"] == "ARC":
         cx, cy = s["center"]
         sp, ep = s["start_p"], s["end_p"]
@@ -259,7 +254,6 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
             lines.append(f"G1 Z{z:.3f} F{plunge}")
             lines.append(f"{g_cmd} X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
 
-    # 3. PHAY HỐC (POCKET)
     elif proc_type == "Pocket" and "points" in s:
         pocket_paths = generate_pocket_toolpaths(s["points"], tool_dia)
         for path_pts in pocket_paths:
@@ -270,7 +264,6 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
                 for p in path_pts[1:]:
                     lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
 
-    # 4. PHAY BIÊN DẠNG (PROFILE / ENGRAVE)
     elif "points" in s:
         actual_pts = apply_tool_offset(s["points"], tool_dia, offset_type) if proc_type == "Profile" else s["points"]
         lines.append(f"G0 X{actual_pts[0][0]:.3f} Y{actual_pts[0][1]:.3f}")
@@ -349,23 +342,29 @@ st.divider()
 col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
-    st.subheader("2. 🔀 Thay đổi Thứ tự cắt & Cấu hình Toolpath")
+    st.subheader("2. 🔀 Sắp Xếp Thứ Tự Cắt & Cấu Hình Toolpath")
     
     if st.session_state["loaded_shapes"]:
         if st.button("⚡ Tối ưu đường chạy dao ngắn nhất (Nearest Neighbor)"):
             st.session_state["loaded_shapes"] = optimize_toolpath_order(st.session_state["loaded_shapes"])
             st.success("Đã tối ưu thứ tự gia công!")
 
-        items_list = [s["name"] for s in st.session_state["loaded_shapes"]]
-        sorted_items = sort_items(items_list, key="sortable_cam_list")
+        # Sắp xếp danh sách an toàn không dùng thư viện ngoài
+        all_names = [s["name"] for s in st.session_state["loaded_shapes"]]
+        selected_order = st.multiselect(
+            "Chọn/Sắp xếp thứ tự cắt theo ý muốn (Chọn lần lượt):",
+            options=all_names,
+            default=all_names
+        )
 
-        reordered_shapes = []
-        for name in sorted_items:
-            for s in st.session_state["loaded_shapes"]:
-                if s["name"] == name:
-                    reordered_shapes.append(s)
-                    break
-        st.session_state["loaded_shapes"] = reordered_shapes
+        if selected_order:
+            reordered_shapes = []
+            for name in selected_order:
+                for s in st.session_state["loaded_shapes"]:
+                    if s["name"] == name:
+                        reordered_shapes.append(s)
+                        break
+            st.session_state["loaded_shapes"] = reordered_shapes
 
         st.write("🛠️ **Cấu hình Kiểu gia công & Tool Offset:**")
         proc_options = ["Profile", "Pocket", "Drill", "Engrave"]
