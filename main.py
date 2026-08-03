@@ -5,8 +5,11 @@ import ezdxf
 from ezdxf import path
 import math
 import io
+import json
 from PIL import Image
 import matplotlib.pyplot as plt
+from google import genai
+from google.genai import types
 
 from shapely.geometry import Polygon, LineString, Point, MultiPolygon
 
@@ -42,7 +45,91 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
     return transformed_shapes
 
 # ==============================================================================
-# 2. XỬ LÝ HÌNH HỌC DXF
+# 2. HÀM TÍCH HỢP GEMINI AI XỬ LÝ ẢNH BẢN VẼ TAY
+# ==============================================================================
+def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
+    """
+    Sử dụng Gemini AI để phân tích ảnh vẽ tay có ghi chú kích thước 
+    và trích xuất tọa độ 2D thực tế (mm).
+    """
+    try:
+        client = genai.Client(api_key=api_key)
+        img = Image.open(io.BytesIO(image_bytes))
+
+        prompt = """
+        Bạn là một chuyên gia CAD/CAM. Hãy phân tích bản vẽ phác thảo vẽ tay trong ảnh.
+        Bản vẽ này có chứa các hình phẳng (hình chữ nhật, đa giác, hình tròn,...) và các ghi chú kích thước bằng số (đơn vị mm).
+
+        Nhiệm vụ:
+        1. Đọc kích thước các cạnh, đường kính/bán kính hoặc tọa độ do người dùng ghi trên ảnh.
+        2. Dựa vào các kích thước đó, tính toán tọa độ 2D (x, y) chuẩn theo hệ tọa độ Đề-các (gốc 0,0 nằm ở góc dưới cùng bên trái của vật thể).
+        3. Trả về kết quả DUY NHẤT dưới dạng chuỗi JSON tuân theo cấu trúc sau:
+        [
+            {
+                "name": "Thanh_Đứng",
+                "type": "POLYLINE",
+                "points": [[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0], [0.0, 0.0]]
+            },
+            {
+                "name": "Lo_Khoan_1",
+                "type": "CIRCLE",
+                "center": [25.0, 25.0],
+                "radius": 5.0
+            }
+        ]
+
+        Lưu ý: 
+        - Chỉ trả về duy nhất mã JSON hợp lệ, không bao gồm giải thích hay định dạng markdown codeblock.
+        - Trường "type" chỉ được nhận giá trị "POLYLINE" hoặc "CIRCLE".
+        - Đối với POLYLINE, tọa độ danh sách điểm points phải khép kín (điểm đầu trùng điểm cuối).
+        """
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[img, prompt]
+        )
+
+        raw_text = response.text.strip()
+        # Loại bỏ các ký tự codeblock nếu có
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[1]
+            if raw_text.endswith("```"):
+                raw_text = raw_text.rsplit("\n", 1)[0]
+            if raw_text.startswith("json"):
+                raw_text = raw_text.split("\n", 1)[1]
+
+        data = json.loads(raw_text)
+        shapes = []
+        for idx, item in enumerate(data):
+            s_name = f"{filename}_{item.get('name', f'shape_{idx+1}')}"
+            stype = item.get("type", "POLYLINE")
+            
+            if stype == "CIRCLE":
+                shapes.append({
+                    "name": s_name,
+                    "type": "CIRCLE",
+                    "center": (float(item["center"][0]), float(item["center"][1])),
+                    "radius": float(item["radius"]),
+                    "process_type": "Drill",
+                    "tool_offset": "Center"
+                })
+            else:
+                shapes.append({
+                    "name": s_name,
+                    "type": "POLYLINE",
+                    "points": [(float(p[0]), float(p[1])) for p in item["points"]],
+                    "process_type": "Profile",
+                    "tool_offset": "Outside"
+                })
+
+        return shapes
+
+    except Exception as e:
+        st.error(f"Lỗi khi Gemini AI phân tích ảnh ({filename}): {e}")
+        return []
+
+# ==============================================================================
+# 3. XỬ LÝ HÌNH HỌC DXF NGUYÊN BẢN
 # ==============================================================================
 def parse_dxf_geometry_v2(file_bytes, filename):
     try:
@@ -103,7 +190,7 @@ def parse_dxf_geometry_v2(file_bytes, filename):
     return shapes
 
 # ==============================================================================
-# 3. TOOL OFFSET & POCKET PASSES
+# 4. TOOL OFFSET & POCKET PASSES
 # ==============================================================================
 def apply_tool_offset(pts, tool_dia, offset_type):
     if len(pts) < 3 or offset_type == "Center":
@@ -156,7 +243,7 @@ def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
     return paths
 
 # ==============================================================================
-# 4. TỐI ƯU THỨ TỰ CHẠY DAO (TSP NEAREST NEIGHBOR)
+# 5. TỐI ƯU THỨ TỰ CHẠY DAO (TSP NEAREST NEIGHBOR)
 # ==============================================================================
 def optimize_toolpath_order(shapes):
     if not shapes: 
@@ -193,7 +280,7 @@ def optimize_toolpath_order(shapes):
     return optimized
 
 # ==============================================================================
-# 5. KIỂM TRA VA CHẠM VÀ VƯỢT KHỔ BÀN CẮT
+# 6. KIỂM TRA VA CHẠM VÀ VƯỢT KHỔ BÀN CẮT
 # ==============================================================================
 def check_safety_and_collisions(shapes, bed_w, bed_h):
     warnings = []
@@ -224,7 +311,7 @@ def check_safety_and_collisions(shapes, bed_w, bed_h):
     return warnings
 
 # ==============================================================================
-# 6. TRÌNH BIÊN DỊCH G-CODE ISO
+# 7. TRÌNH BIÊN DỊCH G-CODE ISO
 # ==============================================================================
 def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
     lines = []
@@ -297,9 +384,9 @@ def build_full_gcode_program(shapes, wcs, spindle, tool_dia, feed, plunge, targe
     return "\n".join(header + body + footer)
 
 # ==============================================================================
-# 7. GIAO DIỆN STREAMLIT
+# 8. GIAO DIỆN STREAMLIT
 # ==============================================================================
-st.set_page_config(page_title="Streamlit CAM Studio Pro v2", layout="wide")
+st.set_page_config(page_title="Streamlit CAM Studio Pro v3", layout="wide")
 st.title("⚙️ Streamlit CAM Studio Pro - Full Suite CNC Toolpath")
 
 # SIDEBAR CONFIGURATION
@@ -318,25 +405,55 @@ feed_rate = st.sidebar.number_input("Tốc độ cắt Feedrate (mm/p)", value=1
 plunge_rate = st.sidebar.number_input("Tốc độ cắm dao Plunge (mm/p)", value=400, step=50)
 spindle_speed = st.sidebar.number_input("Tốc độ Trục chính Spindle (RPM)", value=18000, step=1000)
 
+st.sidebar.divider()
+st.sidebar.header("🤖 Cấu hình Gemini Vision AI")
+api_key = st.sidebar.text_input("Nhập Gemini API Key", type="password", help="Bắt buộc khi chọn đọc File Ảnh Phác Thảo Tay")
+
 if "loaded_shapes" not in st.session_state:
     st.session_state["loaded_shapes"] = []
 
-# WORKSPACE: FILE UPLOADER
-st.subheader("1. 📥 Nạp File DXF")
-uploaded_files = st.file_uploader(
-    "Thả hoặc chọn nhiều file DXF tại đây", 
-    type=["dxf"], 
-    accept_multiple_files=True
+# WORKSPACE: FILE UPLOADER VỚI DROPDOWN LỰA CHỌN
+st.subheader("1. 📥 Nạp File Gia Công")
+
+input_mode = st.selectbox(
+    "Chọn định dạng File đầu vào:",
+    ["File Bản Vẽ CAD (.DXF)", "Ảnh Phác Thảo Vẽ Tay (.PNG, .JPG, .JPEG)"]
 )
 
-if uploaded_files and st.button("🔄 Đọc dữ liệu các File đã tải lên"):
-    all_shapes = []
-    for f in uploaded_files:
-        if f.name.lower().endswith(".dxf"):
+if input_mode == "File Bản Vẽ CAD (.DXF)":
+    uploaded_files = st.file_uploader(
+        "Thả hoặc chọn nhiều file DXF tại đây", 
+        type=["dxf"], 
+        accept_multiple_files=True
+    )
+
+    if uploaded_files and st.button("🔄 Đọc dữ liệu File DXF"):
+        all_shapes = []
+        for f in uploaded_files:
             parsed = parse_dxf_geometry_v2(f, f.name)
             all_shapes.extend(parsed)
-    st.session_state["loaded_shapes"] = all_shapes
-    st.success(f"Đã trích xuất thành công {len(all_shapes)} đối tượng hình học!")
+        st.session_state["loaded_shapes"] = all_shapes
+        st.success(f"Đã trích xuất thành công {len(all_shapes)} đối tượng hình học từ DXF!")
+
+else:
+    uploaded_images = st.file_uploader(
+        "Thả hoặc chọn ảnh phác thảo vẽ tay có ghi chú kích thước tại đây", 
+        type=["png", "jpg", "jpeg"], 
+        accept_multiple_files=True
+    )
+
+    if uploaded_images and st.button("🤖 Phân Tích Ảnh Bằng Gemini AI"):
+        if not api_key:
+            st.error("Vui lòng nhập Gemini API Key ở thanh Sidebar bên trái!")
+        else:
+            all_shapes = []
+            with st.spinner("Gemini AI đang phân tích kích thước và tọa độ từ bức ảnh..."):
+                for img_file in uploaded_images:
+                    bytes_data = img_file.getvalue()
+                    parsed = parse_sketch_image_with_gemini(bytes_data, api_key, img_file.name)
+                    all_shapes.extend(parsed)
+            st.session_state["loaded_shapes"] = all_shapes
+            st.success(f"Gemini AI đã phân tích thành công {len(all_shapes)} đối tượng hình học từ ảnh!")
 
 st.divider()
 col_left, col_right = st.columns([1.2, 1])
@@ -349,7 +466,6 @@ with col_left:
             st.session_state["loaded_shapes"] = optimize_toolpath_order(st.session_state["loaded_shapes"])
             st.success("Đã tối ưu thứ tự gia công!")
 
-        # Sắp xếp danh sách an toàn không dùng thư viện ngoài
         all_names = [s["name"] for s in st.session_state["loaded_shapes"]]
         selected_order = st.multiselect(
             "Chọn/Sắp xếp thứ tự cắt theo ý muốn (Chọn lần lượt):",
