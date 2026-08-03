@@ -5,4 +5,3 @@ ezdxf
 shapely
 matplotlib
 Pillow
-streamlit-drag-drop-sortables
