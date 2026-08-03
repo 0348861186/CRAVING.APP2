@@ -6,4 +6,3 @@ shapely
 matplotlib
 pillow
 google-generativeai
-extra-streamlit-components
