@@ -9,6 +9,7 @@ import json
 import time
 from PIL import Image
 import matplotlib.pyplot as plt
+from matplotlib.patches import Arc as MplArc
 from pydantic import BaseModel, Field, ValidationError
 from typing import List, Optional, Literal
 
@@ -17,7 +18,7 @@ from google.genai import types
 from shapely.geometry import Polygon, MultiPolygon
 
 # ==============================================================================
-# 1. VALIDATION SCHEMA DÙNG PYDANTIC CHO GEMINI OUTPUT
+# 1. ENHANCED GEMINI SCHEMA (NÂNG CẤP SCHEMAS BỔ SUNG ROTATION, CONFIDENCE, LAYER)
 # ==============================================================================
 class ParametricShapeModel(BaseModel):
     name: str = Field(default="shape", description="Tên đối tượng hình học")
@@ -34,21 +35,36 @@ class ParametricShapeModel(BaseModel):
     start_angle: Optional[float] = Field(default=None, description="Góc bắt đầu cho ARC (độ)")
     end_angle: Optional[float] = Field(default=None, description="Góc kết thúc cho ARC (độ)")
     points: Optional[List[List[float]]] = Field(default=None, description="Danh sách tọa độ [[x1,y1],...]")
+    rotation: Optional[float] = Field(default=0.0, description="Góc xoay hình (độ)")
+    confidence: Optional[float] = Field(default=1.0, description="Độ tin cậy trích xuất [0.0 - 1.0]")
+    layer: Optional[str] = Field(default="DEFAULT", description="Tên lớp CAD")
 
 class GeminiResponseModel(BaseModel):
     shapes: List[ParametricShapeModel]
 
 # ==============================================================================
-# 2. SHAPE ENGINE: DỰNG TỌA ĐỘ 2D TỪ PARAMETRIC SHAPE
+# 2. SHAPE ENGINE: CÓ XOAY HÌNH (ROTATION) & TRÍCH XUẤT TỌA ĐỘ
 # ==============================================================================
 class ShapeEngine:
     @staticmethod
-    def create_regular_polygon(center, radius, sides, start_angle=90.0):
+    def rotate_point(pt, angle_deg, center=(0.0, 0.0)):
+        """Xoay một điểm quanh tâm cho trước một góc rad/deg"""
+        if angle_deg == 0.0:
+            return pt
+        rad = math.radians(angle_deg)
+        cx, cy = center
+        x, y = pt[0] - cx, pt[1] - cy
+        rx = x * math.cos(rad) - y * math.sin(rad)
+        ry = x * math.sin(rad) + y * math.cos(rad)
+        return (round(rx + cx, 4), round(ry + cy, 4))
+
+    @classmethod
+    def create_regular_polygon(cls, center, radius, sides, start_angle=90.0, rotation=0.0):
         cx, cy = center
         pts = []
         angle_step = 360.0 / sides
         for i in range(sides):
-            deg = start_angle + i * angle_step
+            deg = start_angle + i * angle_step + rotation
             rad = math.radians(deg)
             x = cx + radius * math.cos(rad)
             y = cy + radius * math.sin(rad)
@@ -56,16 +72,20 @@ class ShapeEngine:
         pts.append(pts[0])  # Khép kín
         return pts
 
-    @staticmethod
-    def create_rectangle(width, height, origin=(0.0, 0.0)):
+    @classmethod
+    def create_rectangle(cls, width, height, origin=(0.0, 0.0), rotation=0.0):
         ox, oy = origin
-        return [
+        pts = [
             (ox, oy),
             (ox + width, oy),
             (ox + width, oy + height),
             (ox, oy + height),
             (ox, oy)
         ]
+        if rotation != 0.0:
+            center = (ox + width / 2.0, oy + height / 2.0)
+            pts = [cls.rotate_point(p, rotation, center) for p in pts]
+        return pts
 
     @classmethod
     def compile_parametric_to_geometry(cls, parametric_shapes: List[ParametricShapeModel], filename=""):
@@ -73,15 +93,17 @@ class ShapeEngine:
         for idx, item in enumerate(parametric_shapes):
             s_name = f"{filename}_{item.name}_{idx+1}"
             stype = item.shape_type
+            rot = item.rotation if item.rotation else 0.0
 
             if stype == "RECTANGLE":
                 w = item.width if item.width else 100.0
                 h = item.height if item.height else 100.0
                 ox, oy = item.origin if item.origin and len(item.origin) >= 2 else [0.0, 0.0]
-                pts = cls.create_rectangle(w, h, (ox, oy))
+                pts = cls.create_rectangle(w, h, (ox, oy), rotation=rot)
                 compiled_shapes.append({
                     "name": s_name, "type": "POLYLINE", "points": pts,
-                    "process_type": "Profile", "tool_offset": "Outside"
+                    "process_type": "Profile", "tool_offset": "Outside",
+                    "layer": item.layer, "confidence": item.confidence
                 })
 
             elif stype == "CIRCLE":
@@ -89,7 +111,8 @@ class ShapeEngine:
                 compiled_shapes.append({
                     "name": s_name, "type": "CIRCLE", "center": (float(cx), float(cy)),
                     "radius": float(item.radius if item.radius else 10.0),
-                    "process_type": "Drill", "tool_offset": "Center"
+                    "process_type": "Drill", "tool_offset": "Center",
+                    "layer": item.layer, "confidence": item.confidence
                 })
 
             elif stype == "REGULAR_POLYGON":
@@ -103,17 +126,18 @@ class ShapeEngine:
                 else:
                     radius = 50.0
 
-                pts = cls.create_regular_polygon((cx, cy), radius, sides)
+                pts = cls.create_regular_polygon((cx, cy), radius, sides, rotation=rot)
                 compiled_shapes.append({
                     "name": s_name, "type": "POLYLINE", "points": pts,
-                    "process_type": "Profile", "tool_offset": "Outside"
+                    "process_type": "Profile", "tool_offset": "Outside",
+                    "layer": item.layer, "confidence": item.confidence
                 })
 
             elif stype == "ARC":
                 cx, cy = item.center if item.center and len(item.center) >= 2 else [0.0, 0.0]
                 radius = float(item.radius if item.radius else 20.0)
-                sa_deg = float(item.start_angle if item.start_angle is not None else 0.0)
-                ea_deg = float(item.end_angle if item.end_angle is not None else 90.0)
+                sa_deg = float(item.start_angle if item.start_angle is not None else 0.0) + rot
+                ea_deg = float(item.end_angle if item.end_angle is not None else 90.0) + rot
                 
                 sa_rad, ea_rad = math.radians(sa_deg), math.radians(ea_deg)
                 start_p = (cx + radius * math.cos(sa_rad), cy + radius * math.sin(sa_rad))
@@ -123,29 +147,31 @@ class ShapeEngine:
                     "name": s_name, "type": "ARC", "center": (cx, cy), "radius": radius,
                     "start_angle": sa_deg, "end_angle": ea_deg,
                     "start_p": start_p, "end_p": end_p,
-                    "process_type": "Profile", "tool_offset": "Center", "cw": True
+                    "process_type": "Profile", "tool_offset": "Center", "cw": True,
+                    "layer": item.layer, "confidence": item.confidence
                 })
 
             else:  # POLYGON
                 raw_pts = item.points if item.points else []
                 pts = [(float(p[0]), float(p[1])) for p in raw_pts if len(p) >= 2]
                 if pts:
+                    if rot != 0.0:
+                        cx = sum(p[0] for p in pts) / len(pts)
+                        cy = sum(p[1] for p in pts) / len(pts)
+                        pts = [cls.rotate_point(p, rot, (cx, cy)) for p in pts]
                     if pts[0] != pts[-1]: pts.append(pts[0])
                     compiled_shapes.append({
                         "name": s_name, "type": "POLYLINE", "points": pts,
-                        "process_type": "Profile", "tool_offset": "Outside"
+                        "process_type": "Profile", "tool_offset": "Outside",
+                        "layer": item.layer, "confidence": item.confidence
                     })
 
         return compiled_shapes
 
 # ==============================================================================
-# 3. INPUT PARSERS (GEMINI + AUTO RETRY 503 & EZDXF)
+# 3. FIX DXF READER & GEMINI PARSER
 # ==============================================================================
 def parse_image_with_gemini_ai(image_bytes, api_key, filename):
-    """
-    Trích xuất Parametric Shape từ ảnh bằng Gemini AI
-    Bổ sung: Auto-Retry khi gặp 503 & Fallback Model dự phòng + Pydantic Validation
-    """
     if not api_key:
         st.error("Vui lòng nhập Gemini API Key!")
         return []
@@ -155,6 +181,7 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
 
     prompt = """
     Bạn là kỹ sư CAD/CAM chuyên nghiệp. Hãy phân tích bản vẽ/ảnh phác thảo và trích xuất các thông số hình học:
+    Cần chú ý trích xuất thêm góc xoay (rotation), lớp CAD (layer) và độ tin cậy (confidence).
     Trả về JSON đúng cấu trúc schema sau:
     {
       "shapes": [
@@ -169,7 +196,10 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
           "origin": [0.0, 0.0],
           "start_angle": 0.0,
           "end_angle": 90.0,
-          "points": [[0,0], [10,0], [10,10]]
+          "points": [[0,0], [10,0], [10,10]],
+          "rotation": 0.0,
+          "confidence": 0.95,
+          "layer": "CUT_OUT"
         }
       ]
     }
@@ -190,7 +220,6 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
                     )
                 )
 
-                # Validation dữ liệu trả về với Pydantic (Xử lý được cả pydantic v1/v2)
                 if hasattr(GeminiResponseModel, 'model_validate_json'):
                     validated_data = GeminiResponseModel.model_validate_json(response.text.strip())
                 else:
@@ -206,7 +235,7 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
                 err_msg = str(e)
                 if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg:
                     wait_time = (attempt + 1) * 2
-                    st.warning(f"⚠️ Model {model_name} đang quá tải (503). Thử lại lần {attempt + 1}/{max_retries_per_model} sau {wait_time}s...")
+                    st.warning(f"⚠️ Model {model_name} quá tải (503). Thử lại {attempt + 1}/{max_retries_per_model} sau {wait_time}s...")
                     time.sleep(wait_time)
                 else:
                     st.error(f"❌ Lỗi xử lý ảnh ({filename}): {e}")
@@ -214,20 +243,17 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
 
         st.warning(f"🔄 Chuyển sang model dự phòng tiếp theo...")
 
-    st.error(f"❌ Tất cả các model Gemini AI đều đang quá tải (503). Vui lòng bấm thử lại sau giây lát!")
+    st.error(f"❌ Tất cả các model Gemini AI đều quá tải. Vui lòng thử lại sau!")
     return []
 
+# FIX 6: SỬ DỤNG TRỰC TIẾP BYTESIO BỎ QUA UTF-8 DECODE
 def parse_dxf_with_ezdxf(file_bytes, filename):
-    """Trích xuất dữ liệu hình học từ File DXF bằng ezdxf"""
+    """Trích xuất dữ liệu hình học từ File DXF bằng ezdxf trực tiếp từ BytesIO"""
     try:
-        content = file_bytes.getvalue().decode('utf-8', errors='ignore')
-        doc = ezdxf.read(io.StringIO(content))
-    except Exception:
-        try:
-            doc = ezdxf.read(io.BytesIO(file_bytes.getvalue()))
-        except Exception as ex:
-            st.error(f"Lỗi đọc DXF ({filename}): {ex}")
-            return []
+        doc = ezdxf.read(io.BytesIO(file_bytes.getvalue()))
+    except Exception as ex:
+        st.error(f"Lỗi đọc DXF ({filename}): {ex}")
+        return []
 
     msp = doc.modelspace()
     shapes = []
@@ -276,8 +302,10 @@ def parse_dxf_with_ezdxf(file_bytes, filename):
     return shapes
 
 # ==============================================================================
-# 4. HẬU KỲ: WORK ZERO, OFFSET, POCKET, COLLISION & OPTIMIZATION
+# 4. HẬU KỲ: WORK ZERO, OFFSET, POCKET (FIX 1 & FIX 5), SAFETY & OPTIMIZATION
 # ==============================================================================
+
+# FIX 1: BỔ SUNG COPY ĐẦY ĐỦ THUỘC TÍNH RADIUS VÀ ARC
 def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
     offset_x, offset_y = 0.0, 0.0
     if work_zero == "Top Left": offset_y = -bed_h
@@ -298,6 +326,11 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
             ex, ey = shape["end_p"]
             ns["start_p"] = (sx + offset_x, sy + offset_y)
             ns["end_p"] = (ex + offset_x, ey + offset_y)
+        
+        # Bổ sung truyền radius nguyên vẹn
+        if "radius" in shape:
+            ns["radius"] = shape["radius"]
+            
         transformed.append(ns)
     return transformed
 
@@ -318,6 +351,7 @@ def apply_tool_offset(pts, tool_dia, offset_type):
     elif isinstance(offset_poly, MultiPolygon): return list(offset_poly.geoms[0].exterior.coords)
     return pts
 
+# FIX 5: BỔ SUNG CHỐNG LẶP VÔ HẠN CHO POCKET MULTIPOLYGON (STEP CHECK & AREA CHECK)
 def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
     closed_pts = list(pts)
     if closed_pts[0] != closed_pts[-1]: closed_pts.append(closed_pts[0])
@@ -326,17 +360,33 @@ def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
     if not poly.is_valid: poly = poly.buffer(0)
 
     step = tool_dia * stepover_ratio
+    if abs(step) < 0.001:
+        return []
+
     paths = []
     current_poly = poly.buffer(-tool_dia / 2.0)
 
-    while not current_poly.is_empty:
+    max_loops = 500  # Ngưỡng an toàn tối đa
+    loop_count = 0
+
+    while not current_poly.is_empty and loop_count < max_loops:
+        loop_count += 1
+        
+        # Thêm điều kiện diện tích nhỏ thì dừng
+        if current_poly.area < 0.01:
+            break
+
         if isinstance(current_poly, Polygon):
             paths.append(list(current_poly.exterior.coords))
             current_poly = current_poly.buffer(-step)
         elif isinstance(current_poly, MultiPolygon):
-            for p in current_poly.geoms: paths.append(list(p.exterior.coords))
+            for p in current_poly.geoms:
+                if p.area >= 0.01:
+                    paths.append(list(p.exterior.coords))
             current_poly = current_poly.buffer(-step)
-        else: break
+        else:
+            break
+
     return paths
 
 def check_safety_and_collisions(shapes, bed_w, bed_h):
@@ -392,9 +442,9 @@ def optimize_toolpath_order(shapes):
     return optimized
 
 # ==============================================================================
-# 5. G-CODE COMPILER WITH ARC COMMANDS (G2/G3 INTEGRATED)
+# 5. G-CODE COMPILER (FIX 4: CHỌN MỐI TỰ DO IJK / R RADIUS, FIX 8: LEAD-IN / LEAD-OUT)
 # ==============================================================================
-def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
+def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down, arc_mode="IJK", lead_in_type="None"):
     lines = []
     proc_type = s.get("process_type", "Profile")
     offset_type = s.get("tool_offset", "Outside")
@@ -404,18 +454,22 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
 
     lines.append(f"(--- TOOLPATH: {s['name']} | TYPE: {proc_type} ---)")
 
-    # 1. ARC CUNG TRÒN (NỘI SUY G2 / G3)
+    # 1. ARC CUNG TRÒN
     if s["type"] == "ARC":
         cx, cy = s["center"]
         sp, ep = s["start_p"], s["end_p"]
-        i_val = cx - sp[0]
-        j_val = cy - sp[1]
+        r_val = s.get("radius", 10.0)
         g_cmd = "G2" if s.get("cw", True) else "G3"
 
         lines.append(f"G0 X{sp[0]:.3f} Y{sp[1]:.3f}")
         for z in z_levels:
             lines.append(f"G1 Z{z:.3f} F{plunge}")
-            lines.append(f"{g_cmd} X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
+            if arc_mode == "R Radius":
+                lines.append(f"{g_cmd} X{ep[0]:.3f} Y{ep[1]:.3f} R{r_val:.3f} F{feed}")
+            else:  # IJK Mode
+                i_val = cx - sp[0]
+                j_val = cy - sp[1]
+                lines.append(f"{g_cmd} X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
 
     # 2. DRILL / KHOAN TRÒN
     elif proc_type == "Drill" or s["type"] == "CIRCLE":
@@ -436,19 +490,40 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
                 for p in path_pts[1:]:
                     lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
 
-    # 4. PROFILE / PHAY BIÊN DẠNG POLYLINE
+    # 4. PROFILE / PHAY BIÊN DẠNG POLYLINE (FIX 8: LEAD-IN TRÁNH ĂN TRỰC TIẾP VÀO CẠNH)
     elif "points" in s:
         actual_pts = apply_tool_offset(s["points"], tool_dia, offset_type) if proc_type == "Profile" else s["points"]
-        lines.append(f"G0 X{actual_pts[0][0]:.3f} Y{actual_pts[0][1]:.3f}")
+        p0 = actual_pts[0]
+        p1 = actual_pts[1] if len(actual_pts) > 1 else p0
+
+        # Tính Vector Lead-in
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        dist = math.hypot(dx, dy)
+        lead_len = 5.0  # Độ dài lead-in 5mm
+
+        if dist > 0:
+            nx, ny = -dy / dist, dx / dist  # Vector pháp tuyến
+            lead_start = (p0[0] + nx * lead_len, p0[1] + ny * lead_len)
+        else:
+            lead_start = (p0[0] - lead_len, p0[1])
+
+        # Điểm An Toàn Rapid
+        if lead_in_type == "Linear":
+            lines.append(f"G0 X{lead_start[0]:.3f} Y{lead_start[1]:.3f}")
+        else:
+            lines.append(f"G0 X{p0[0]:.3f} Y{p0[1]:.3f}")
+
         for z in z_levels:
             lines.append(f"G1 Z{z:.3f} F{plunge}")
+            if lead_in_type == "Linear":
+                lines.append(f"G1 X{p0[0]:.3f} Y{p0[1]:.3f} F{feed}")  # Cắt xéo vào cạnh phôi
             for p in actual_pts[1:]:
                 lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
 
     lines.append("G0 Z15.000\n")
     return "\n".join(lines)
 
-def build_full_gcode(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, step_down):
+def build_full_gcode(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, step_down, arc_mode, lead_in):
     header = [
         "(--- STREAMLIT CAM STUDIO PRO - ISO G-CODE ---)",
         "G21 G90 G17 G94",
@@ -456,15 +531,15 @@ def build_full_gcode(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, ste
         f"M3 S{spindle}",
         "G0 Z15.000\n"
     ]
-    body = [compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down) for s in shapes]
+    body = [compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down, arc_mode, lead_in) for s in shapes]
     footer = ["M5 M9", f"{wcs} G0 X0.000 Y0.000", "M30"]
     return "\n".join(header + body + footer)
 
 # ==============================================================================
-# 6. GIAO DIỆN STREAMLIT & QUẢN LÝ PROJECT JSON
+# 6. GIAO DIỆN STREAMLIT & MÔ PHỎNG CAD (FIX 3: DÙNG MATPLOTLIB.PATCHES.ARC)
 # ==============================================================================
-st.set_page_config(page_title="CAM Studio Pro v4", layout="wide")
-st.title("⚙️ Parametric CAM Studio - Arc G-code, Project JSON & Validation")
+st.set_page_config(page_title="CAM Studio Pro v5", layout="wide")
+st.title("⚙️ Parametric CAM Studio - Fully Corrected Engine")
 
 if "loaded_shapes" not in st.session_state:
     st.session_state["loaded_shapes"] = []
@@ -485,39 +560,32 @@ feed_rate = st.sidebar.number_input("Feedrate (mm/p)", value=1800)
 plunge_rate = st.sidebar.number_input("Plunge Rate (mm/p)", value=400)
 spindle_speed = st.sidebar.number_input("Spindle (RPM)", value=18000)
 
+# ADVANCED CNC OPTIONS
+st.sidebar.divider()
+st.sidebar.header("🎛️ Nâng Cấp CNC Controller")
+arc_mode = st.sidebar.radio("Chế độ G2/G3 Arc", ["IJK", "R Radius"], help="Dùng R Radius cho các cung > 180 deg hoặc controller thế hệ cũ")
+lead_in_option = st.sidebar.radio("Cắt Thâm Nhập (Lead-in)", ["None", "Linear"], help="Tránh dao ăn dập trực tiếp vuông góc vào thành phôi")
+
 api_key = st.sidebar.text_input("Gemini API Key (Dành cho ảnh)", type="password")
 
 # PROJECT SAVE & LOAD IN SIDEBAR
 st.sidebar.divider()
 st.sidebar.header("💾 Quản Lý Project (JSON)")
 
-# 1. LƯU PROJECT
 current_settings = {
-    "wcs": wcs_option,
-    "work_zero": work_zero_pos,
-    "bed_width": bed_width,
-    "bed_height": bed_height,
-    "tool_diameter": tool_diameter,
-    "target_depth": target_depth,
-    "step_down": step_down,
-    "feed_rate": feed_rate,
-    "plunge_rate": plunge_rate,
-    "spindle_speed": spindle_speed
+    "wcs": wcs_option, "work_zero": work_zero_pos, "bed_width": bed_width,
+    "bed_height": bed_height, "tool_diameter": tool_diameter, "target_depth": target_depth,
+    "step_down": step_down, "feed_rate": feed_rate, "plunge_rate": plunge_rate,
+    "spindle_speed": spindle_speed, "arc_mode": arc_mode, "lead_in": lead_in_option
 }
-project_data = {
-    "settings": current_settings,
-    "shapes": st.session_state["loaded_shapes"]
-}
+project_data = {"settings": current_settings, "shapes": st.session_state["loaded_shapes"]}
 
-project_json_str = json.dumps(project_data, indent=2)
 st.sidebar.download_button(
     "💾 Tải Project Hiện Tại (.json)",
-    data=project_json_str,
-    file_name="cam_project.json",
-    mime="application/json"
+    data=json.dumps(project_data, indent=2),
+    file_name="cam_project.json", mime="application/json"
 )
 
-# 2. NẠP PROJECT
 uploaded_project = st.sidebar.file_uploader("📂 Nạp File Project (.json)", type=["json"])
 if uploaded_project is not None:
     try:
@@ -547,7 +615,7 @@ else:
             st.error("Vui lòng nhập Gemini API Key ở Sidebar!")
         else:
             shapes = []
-            with st.spinner("Gemini AI đang trích xuất & Kiểm tra Validation Pydantic Schema..."):
+            with st.spinner("Gemini AI đang trích xuất & Validation Schema nâng cao..."):
                 for img in uploaded_imgs:
                     shapes.extend(parse_image_with_gemini_ai(img.getvalue(), api_key, img.name))
             st.session_state["loaded_shapes"] = shapes
@@ -559,7 +627,7 @@ st.divider()
 col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
-    st.subheader("2. 🛠️ SHAPE ENGINE: Cấu hình Toolpath, Offset & Pocket")
+    st.subheader("2. 🛠️ SHAPE ENGINE: Cấu hình Toolpath & Offset")
     if st.session_state["loaded_shapes"]:
         if st.button("⚡ Tối ưu đường chạy dao (Optimize - Nearest Neighbor)"):
             st.session_state["loaded_shapes"] = optimize_toolpath_order(st.session_state["loaded_shapes"])
@@ -570,19 +638,21 @@ with col_left:
 
         for idx, s in enumerate(st.session_state["loaded_shapes"]):
             c1, c2, c3 = st.columns([2, 1.5, 1.5])
-            with c1: st.caption(f"**{s['name']}** ({s['type']})")
+            with c1: 
+                layer_info = f" [{s.get('layer','DEFAULT')}]" if s.get('layer') else ""
+                st.caption(f"**{s['name']}** ({s['type']}){layer_info}")
             with c2: s["process_type"] = st.selectbox("Kiểu cắt", proc_options, key=f"proc_{idx}", index=0)
             with c3: s["tool_offset"] = st.selectbox("Offset dao", off_options, key=f"off_{idx}", index=0)
 
 with col_right:
-    st.subheader("3. 👁️ Mô phỏng Arc/Polyline & Collision Check")
+    st.subheader("3. 👁️ Preview CAD Chuẩn Xác")
     transformed_shapes = apply_work_zero_offset(st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos)
     
     warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
     if warnings:
         for w in warnings: st.error(w)
     else:
-        st.info("✅ Kiểm tra an toàn: Không phát hiện va chạm hoặc vượt khổ bàn phôi.")
+        st.info("✅ Kiểm tra an toàn: Bàn phôi OK.")
 
     fig, ax = plt.subplots(figsize=(6, 5))
     ax.set_aspect('equal')
@@ -590,6 +660,7 @@ with col_right:
     ax.axhline(0, color='red', linewidth=1)
     ax.axvline(0, color='red', linewidth=1)
 
+    # FIX 3: VẼ CHUẨN ARC BẰNG MATPLOTLIB.PATCHES.ARC
     for s in transformed_shapes:
         if "points" in s:
             pts = np.array(s["points"])
@@ -599,17 +670,26 @@ with col_right:
             circle = plt.Circle((cx, cy), s["radius"], color='g', fill=False)
             ax.add_patch(circle)
         elif s["type"] == "ARC":
-            sp, ep = s["start_p"], s["end_p"]
-            ax.plot([sp[0], ep[0]], [sp[1], ep[1]], 'm-o', label="Arc Boundary")
+            cx, cy = s["center"]
+            r = s.get("radius", 10.0)
+            sa = s.get("start_angle", 0.0)
+            ea = s.get("end_angle", 90.0)
+
+            arc_patch = MplArc(
+                (cx, cy), r * 2, r * 2,
+                angle=0, theta1=sa, theta2=ea,
+                color="magenta", linewidth=2
+            )
+            ax.add_patch(arc_patch)
 
     st.pyplot(fig)
 
-# SECTION 3: EXPORT ISO G-CODE (SUPPORT G2/G3 ARC)
+# SECTION 3: EXPORT ISO G-CODE
 st.divider()
-st.subheader("4. 🚀 Xuất G-Code ISO (Hỗ trợ Arc G2/G3)")
+st.subheader("4. 🚀 Xuất G-Code ISO")
 if st.session_state["loaded_shapes"]:
     gcode_text = build_full_gcode(
         transformed_shapes, wcs_option, spindle_speed, tool_diameter,
-        feed_rate, plunge_rate, target_depth, step_down
+        feed_rate, plunge_rate, target_depth, step_down, arc_mode, lead_in_option
     )
     st.download_button("💾 Tải File ISO G-Code (.nc)", data=gcode_text, file_name="OUTPUT_PROGRAM.nc", mime="text/plain")
