@@ -6,6 +6,7 @@ from ezdxf import path
 import math
 import io
 import json
+import re
 from PIL import Image
 import matplotlib.pyplot as plt
 from google import genai
@@ -37,7 +38,7 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
             new_shape["center"] = (cx + offset_x, cy + offset_y)
         if "start_p" in shape and "end_p" in shape:
             sx, sy = shape["start_p"]
-            ex, ey = shape["end_p"]
+            ex, ey = shape["start_p"]
             new_shape["start_p"] = (sx + offset_x, sy + offset_y)
             new_shape["end_p"] = (ex + offset_x, ey + offset_y)
         transformed_shapes.append(new_shape)
@@ -45,43 +46,45 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
     return transformed_shapes
 
 # ==============================================================================
-# 2. HÀM TÍCH HỢP GEMINI AI XỬ LÝ ẢNH BẢN VẼ TAY
+# 2. HÀM GEMINI VISION AI - XỬ LÝ MỌI LOẠI HÌNH VẼ TAY (ĐÃ TỐI ƯU HOÀN CHỈNH)
 # ==============================================================================
 def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
     """
-    Sử dụng Gemini AI để phân tích ảnh vẽ tay có ghi chú kích thước 
-    và trích xuất tọa độ 2D thực tế (mm).
+    Sử dụng Gemini AI để phân tích BẤT KỲ hình dạng nào từ ảnh chụp vẽ tay 
+    (chữ nhật, đa giác, hình tròn, lỗ khoan,...) và xuất tọa độ 2D thực tế (mm).
     """
     try:
         client = genai.Client(api_key=api_key)
         img = Image.open(io.BytesIO(image_bytes))
 
         prompt = """
-        Bạn là một chuyên gia CAD/CAM. Hãy phân tích bản vẽ phác thảo vẽ tay trong ảnh.
-        Bản vẽ này có chứa các hình phẳng (hình chữ nhật, đa giác, hình tròn,...) và các ghi chú kích thước bằng số (đơn vị mm).
+        Bạn là một kỹ sư lập trình CAD/CAM chuyên nghiệp.
+        Hãy phân tích TẤT CẢ các đối tượng hình học trong ảnh chụp bản vẽ phác thảo tay (có thể gồm: hình chữ nhật, hình vuông, tam giác, đa giác bất kỳ, hình tròn, lỗ khoan,...).
 
-        Nhiệm vụ:
-        1. Đọc kích thước các cạnh, đường kính/bán kính hoặc tọa độ do người dùng ghi trên ảnh.
-        2. Dựa vào các kích thước đó, tính toán tọa độ 2D (x, y) chuẩn theo hệ tọa độ Đề-các (gốc 0,0 nằm ở góc dưới cùng bên trái của vật thể).
-        3. Trả về kết quả DUY NHẤT dưới dạng chuỗi JSON tuân theo cấu trúc sau:
+        QUY TẮC XỬ LÝ KÍCH THƯỚC & TỌA ĐỘ:
+        1. Đọc tất cả các số ghi chú kích thước (tính bằng mm) ghi trên các cạnh, bán kính hoặc đường kính.
+        2. Dựa vào các kích thước đó, tính toán và quy đổi thành hệ tọa độ Đề-các 2D (Cartesian):
+           - Đặt gốc tọa độ (0, 0) tại GÓC DƯỚI BÊN TRÁI của vật thể/chi tiết chính.
+           - Nếu là HÌNH CHỮ NHẬT / HÌNH VUÔNG có kích thước X = W mm và Y = H mm, danh sách điểm 'points' PHẢI LÀ:
+             [[0.0, 0.0], [W, 0.0], [W, H], [0.0, H], [0.0, 0.0]] (Khép kín 5 điểm).
+           - Nếu là ĐA GIÁC / HÌNH PHỨC TẠP, liệt kê danh sách tọa độ các đỉnh 'points' nối tiếp nhau theo chu vi và ĐẢM BẢO KHẾP KÍN (điểm cuối trùng điểm đầu).
+           - Nếu là HÌNH TRÒN / LỖ KHOAN, trích xuất tọa độ tâm 'center': [X, Y] và bán kính 'radius': R.
+
+        YÊU CẦU ĐẦU RA:
+        Trả về DUY NHẤT mảng JSON hợp lệ (không chứa bất kỳ văn bản giải thích nào khác, không dùng markdown codeblock ```json):
         [
             {
-                "name": "Thanh_Đứng",
+                "name": "Bien_Dang_Ngoai",
                 "type": "POLYLINE",
-                "points": [[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0], [0.0, 0.0]]
+                "points": [[0.0, 0.0], [150.0, 0.0], [150.0, 80.0], [0.0, 80.0], [0.0, 0.0]]
             },
             {
                 "name": "Lo_Khoan_1",
                 "type": "CIRCLE",
-                "center": [25.0, 25.0],
+                "center": [30.0, 40.0],
                 "radius": 5.0
             }
         ]
-
-        Lưu ý: 
-        - Chỉ trả về duy nhất mã JSON hợp lệ, không bao gồm giải thích hay định dạng markdown codeblock.
-        - Trường "type" chỉ được nhận giá trị "POLYLINE" hoặc "CIRCLE".
-        - Đối với POLYLINE, tọa độ danh sách điểm points phải khép kín (điểm đầu trùng điểm cuối).
         """
 
         response = client.models.generate_content(
@@ -90,19 +93,18 @@ def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
         )
 
         raw_text = response.text.strip()
-        # Loại bỏ các ký tự codeblock nếu có
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("\n", 1)[1]
-            if raw_text.endswith("```"):
-                raw_text = raw_text.rsplit("\n", 1)[0]
-            if raw_text.startswith("json"):
-                raw_text = raw_text.split("\n", 1)[1]
+
+        # Trích xuất chuỗi JSON bằng Regex để loại bỏ tạp chất markdown
+        json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
+        if json_match:
+            raw_text = json_match.group(0)
 
         data = json.loads(raw_text)
         shapes = []
+
         for idx, item in enumerate(data):
             s_name = f"{filename}_{item.get('name', f'shape_{idx+1}')}"
-            stype = item.get("type", "POLYLINE")
+            stype = str(item.get("type", "POLYLINE")).upper()
             
             if stype == "CIRCLE":
                 shapes.append({
@@ -114,10 +116,15 @@ def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
                     "tool_offset": "Center"
                 })
             else:
+                pts = [(float(p[0]), float(p[1])) for p in item["points"]]
+                # Tự động khép kín đường chạy dao nếu AI trả về thiếu điểm nối
+                if pts and pts[0] != pts[-1]:
+                    pts.append(pts[0])
+                    
                 shapes.append({
                     "name": s_name,
                     "type": "POLYLINE",
-                    "points": [(float(p[0]), float(p[1])) for p in item["points"]],
+                    "points": pts,
                     "process_type": "Profile",
                     "tool_offset": "Outside"
                 })
@@ -493,78 +500,4 @@ with col_left:
             with c2: 
                 curr_proc = s.get("process_type", "Profile")
                 proc_idx = proc_options.index(curr_proc) if curr_proc in proc_options else 0
-                s["process_type"] = st.selectbox("Kiểu cắt", proc_options, key=f"proc_{idx}", index=proc_idx)
-            with c3:
-                curr_off = s.get("tool_offset", "Outside")
-                off_idx = off_options.index(curr_off) if curr_off in off_options else 0
-                s["tool_offset"] = st.selectbox("Offset dao", off_options, key=f"off_{idx}", index=off_idx)
-
-with col_right:
-    st.subheader("3. 👁️ Mô Phỏng Bàn Cắt & Cảnh Báo An Toàn")
-    
-    transformed_shapes = apply_work_zero_offset(st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos)
-    
-    safety_warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
-    if safety_warnings:
-        for w in safety_warnings: 
-            st.error(w)
-    else:
-        st.info("✅ Kiểm tra an toàn: Không phát hiện va chạm hoặc vượt khổ bàn cắt.")
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-    
-    if work_zero_pos == "Bottom Left":
-        ax.set_xlim(0, bed_width); ax.set_ylim(0, bed_height)
-    elif work_zero_pos == "Center":
-        ax.set_xlim(-bed_width/2, bed_width/2); ax.set_ylim(-bed_height/2, bed_height/2)
-    else:
-        ax.set_xlim(-bed_width, bed_width); ax.set_ylim(-bed_height, bed_height)
-
-    ax.set_aspect('equal')
-    ax.grid(True, linestyle='--', alpha=0.5)
-    ax.axhline(0, color='red', linewidth=1); ax.axvline(0, color='red', linewidth=1)
-    ax.plot(0, 0, 'rX', markersize=10, label=f"Work Zero {wcs_option}")
-
-    for s in transformed_shapes:
-        if "points" in s:
-            pts = np.array(s["points"])
-            ax.plot(pts[:, 0], pts[:, 1], 'b-', linewidth=1.2)
-        elif s["type"] == "CIRCLE":
-            cx, cy = s["center"]
-            circle_patch = plt.Circle((cx, cy), s["radius"], color='g', fill=False, linewidth=1.2)
-            ax.add_patch(circle_patch)
-        elif s["type"] == "ARC":
-            sp, ep = s["start_p"], s["end_p"]
-            ax.plot([sp[0], ep[0]], [sp[1], ep[1]], 'm--', linewidth=1.2)
-
-    ax.legend(loc="upper right")
-    st.pyplot(fig)
-
-# BOTTOM SECTION: G-CODE GENERATION & DOWNLOAD
-st.divider()
-st.subheader("4. 🚀 Xuất Chương Trình G-Code ISO")
-
-if st.session_state["loaded_shapes"]:
-    c_btn1, c_btn2 = st.columns(2)
-    
-    with c_btn1:
-        full_gcode = build_full_gcode_program(
-            transformed_shapes, wcs_option, spindle_speed, tool_diameter, 
-            feed_rate, plunge_rate, target_depth, step_down
-        )
-        st.download_button(
-            "💾 Tải File G-Code TỔNG (.nc)", 
-            data=full_gcode, file_name="FULL_PROGRAM.nc", mime="text/plain"
-        )
-
-    with c_btn2:
-        st.write("📦 **Tải file G-Code lẻ từng chi tiết:**")
-        for s in transformed_shapes:
-            single_gcode = build_full_gcode_program(
-                [s], wcs_option, spindle_speed, tool_diameter, 
-                feed_rate, plunge_rate, target_depth, step_down
-            )
-            st.download_button(
-                f"💾 File: {s['name']}.nc", 
-                data=single_gcode, file_name=f"{s['name']}.nc", mime="text/plain"
-            )
+                s["process_type"] = st.selectbox("Kiểu cắt", proc_optionsBạn chưa gửi kèm các yêu cầu hoặc đoạn code trước đó trong đoạn chat này.
