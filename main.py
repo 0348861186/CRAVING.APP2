@@ -238,26 +238,15 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
     st.error(f"❌ Tất cả các model Gemini AI đều quá tải. Vui lòng thử lại sau!")
     return []
 
-# ==============================================================================
-# 3.1. ĐỌC DXF AN TOÀN (SỬA LỖI BYTES-LIKE OBJECT)
-# ==============================================================================
-def parse_dxf_with_ezdxf(file_upload, filename):
-    shapes = []
+def parse_dxf_with_ezdxf(file_bytes, filename):
     try:
-        raw_data = file_upload.getvalue()
-        
-        # Đảm bảo dữ liệu đầu vào luôn là bytes
-        if isinstance(raw_data, str):
-            raw_bytes = raw_data.encode('utf-8', errors='ignore')
-        else:
-            raw_bytes = raw_data
-
-        doc = ezdxf.read(io.BytesIO(raw_bytes))
+        doc = ezdxf.read(io.BytesIO(file_bytes.getvalue()))
     except Exception as ex:
         st.error(f"Lỗi đọc DXF ({filename}): {ex}")
         return []
 
     msp = doc.modelspace()
+    shapes = []
 
     for idx, entity in enumerate(msp):
         dxftype = entity.dxftype()
@@ -268,7 +257,7 @@ def parse_dxf_with_ezdxf(file_upload, filename):
             radius = float(entity.dxf.radius)
             shapes.append({
                 "name": s_name, "type": "CIRCLE", "shape_kind": "CIRCLE", "center": center, "radius": radius,
-                "description": f"Hình từ DXF: Hình tròn (R={radius:.1f}mm)",
+                "description": f"Hình sau xử lý là hình tròn (R={radius:.1f}mm)",
                 "process_type": "Drill", "tool_offset": "Center"
             })
 
@@ -285,7 +274,7 @@ def parse_dxf_with_ezdxf(file_upload, filename):
                 "name": s_name, "type": "ARC", "shape_kind": "ARC", "center": center, "radius": radius,
                 "start_angle": start_angle, "end_angle": end_angle,
                 "start_p": start_p, "end_p": end_p,
-                "description": f"Hình từ DXF: Cung tròn (R={radius:.1f}mm)",
+                "description": f"Hình sau xử lý là cung tròn (R={radius:.1f}mm)",
                 "process_type": "Profile", "tool_offset": "Center", "cw": True
             })
 
@@ -297,7 +286,7 @@ def parse_dxf_with_ezdxf(file_upload, filename):
                 if len(pts) >= 2:
                     shapes.append({
                         "name": s_name, "type": "POLYLINE", "shape_kind": "POLYGON", "points": pts,
-                        "description": f"Hình từ DXF: Đa giác/Polyline ({len(pts)} đỉnh)",
+                        "description": "Hình sau xử lý là đường Polyline / Đa giác",
                         "process_type": "Profile", "tool_offset": "Outside"
                     })
             except Exception:
@@ -625,7 +614,7 @@ with col_left:
 
         for idx, s in enumerate(st.session_state["loaded_shapes"]):
             st.markdown(f"**📌 {s['name']}**")
-            st.info(f"💡 **Chú thích từ AI/DXF:** {s.get('description', 'Chưa có chú thích')}")
+            st.info(f"💡 **Chú thích từ AI:** {s.get('description', 'Chưa có chú thích')}")
             
             c1, c2 = st.columns([1, 1])
             with c1: s["process_type"] = st.selectbox("Kiểu cắt", proc_options, key=f"proc_{idx}", index=0)
