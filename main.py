@@ -1,31 +1,21 @@
-import streamlit as st
-import numpy as np
+import io
+import json
+import math
 import cv2
 import ezdxf
-from ezdxf import path
-import math
-import json
-import io
-from PIL import Image
 import google.generativeai as genai
 import matplotlib.pyplot as plt
-
-from shapely.geometry import Polygon, LineString, Point, MultiPolygon
-from shapely.affinity import translate, rotate
-from streamlit_sortable import sort_items  # Cần pip install streamlit-sortable
+import numpy as np
+from PIL import Image
+from shapely.affinity import rotate, translate
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+import streamlit as st
+from ezdxf import path
 
 # ==============================================================================
 # 1. BÀN CẮT VÀ CHUYỂN ĐỔI GỐC TỌA ĐỘ (WORK ZERO ALIGNMENT)
 # ==============================================================================
 def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
-    """
-    Dịch chuyển tọa độ của các shape dựa trên Work Zero (Origin) được chọn.
-    Bottom Left (0,0) -> Giữ nguyên.
-    Top Left -> Y_new = Y - bed_h
-    Top Right -> X_new = X - bed_w, Y_new = Y - bed_h
-    Bottom Right -> X_new = X - bed_w
-    Center -> X_new = X - bed_w/2, Y_new = Y - bed_h/2
-    """
     offset_x, offset_y = 0.0, 0.0
     if work_zero == "Top Left":
         offset_y = -bed_h
@@ -44,12 +34,19 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
         if "center" in shape:
             cx, cy = shape["center"]
             new_shape["center"] = (cx + offset_x, cy + offset_y)
+        if "start_p" in shape:
+            sx, sy = shape["start_p"]
+            new_shape["start_p"] = (sx + offset_x, sy + offset_y)
+        if "end_p" in shape:
+            ex, ey = shape["end_p"]
+            new_shape["end_p"] = (ex + offset_x, ey + offset_y)
+            
         transformed_shapes.append(new_shape)
         
     return transformed_shapes
 
 # ==============================================================================
-# 2. XỬ LÝ NÂNG CẤP HÌNH HỌC DXF (HỖ TRỢ ARC & CIRCLE NGUYÊN BẢN G2/G3)
+# 2. XỬ LÝ NÂNG CẤP HÌNH HỌC DXF
 # ==============================================================================
 def parse_dxf_geometry_v2(file_bytes, filename):
     try:
@@ -83,7 +80,6 @@ def parse_dxf_geometry_v2(file_bytes, filename):
             start_angle = float(entity.dxf.start_angle)
             end_angle = float(entity.dxf.end_angle)
             
-            # Tính điểm bắt đầu và kết thúc
             sa_rad, ea_rad = math.radians(start_angle), math.radians(end_angle)
             start_p = (center[0] + radius * math.cos(sa_rad), center[1] + radius * math.sin(sa_rad))
             end_p = (center[0] + radius * math.cos(ea_rad), center[1] + radius * math.sin(ea_rad))
@@ -92,7 +88,7 @@ def parse_dxf_geometry_v2(file_bytes, filename):
                 "name": s_name, "type": "ARC", "center": center, "radius": radius,
                 "start_angle": start_angle, "end_angle": end_angle,
                 "start_p": start_p, "end_p": end_p,
-                "process_type": "Profile", "tool_offset": "OnLine"
+                "process_type": "Profile", "tool_offset": "Center"
             })
 
         elif dxftype in ['LWPOLYLINE', 'POLYLINE', 'ELLIPSE', 'SPLINE', 'LINE']:
@@ -111,10 +107,10 @@ def parse_dxf_geometry_v2(file_bytes, filename):
     return shapes
 
 # ==============================================================================
-# 3. HỖ TRỢ TOOL OFFSET (INSIDE / OUTSIDE / CENTER) & POCKET PASSES
+# 3. HỖ TRỢ TOOL OFFSET & POCKET PASSES
 # ==============================================================================
 def apply_tool_offset(pts, tool_dia, offset_type):
-    if len(pts) < 3 or offset_type == "Center" or offset_type == "OnLine":
+    if len(pts) < 3 or offset_type in ["Center", "OnLine"]:
         return pts
     
     poly = Polygon(pts)
@@ -126,7 +122,7 @@ def apply_tool_offset(pts, tool_dia, offset_type):
 
     offset_poly = poly.buffer(buffer_dist)
     if offset_poly.is_empty:
-        return pts # Trả về điểm gốc nếu dao quá to không offset được
+        return pts
     
     if isinstance(offset_poly, Polygon):
         return list(offset_poly.exterior.coords)
@@ -135,7 +131,6 @@ def apply_tool_offset(pts, tool_dia, offset_type):
     return pts
 
 def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
-    """Tạo chuỗi đường cắt dạng Spiral Inset cho phay hốc (Pocket)."""
     poly = Polygon(pts)
     if not poly.is_valid: poly = poly.buffer(0)
 
@@ -162,10 +157,10 @@ def optimize_toolpath_order(shapes):
     if not shapes: return []
     
     def get_start_point(s):
-        if s["type"] in ["POLYLINE", "POCKET"]: return s["points"][0]
-        elif s["type"] in ["CIRCLE", "DRILL"]: return s["center"]
-        elif s["type"] == "ARC": return s["start_p"]
-        return (0, 0)
+        if s["type"] in ["POLYLINE", "POCKET"] and "points" in s: return s["points"][0]
+        elif s["type"] in ["CIRCLE", "DRILL"] and "center" in s: return s["center"]
+        elif s["type"] == "ARC" and "start_p" in s: return s["start_p"]
+        return (0.0, 0.0)
 
     unvisited = shapes.copy()
     optimized = []
@@ -211,7 +206,7 @@ def check_safety_and_collisions(shapes, bed_w, bed_h):
 
             poly = Polygon(pts)
             if poly.is_valid:
-                for idx, existing_poly in enumerate(polygons):
+                for existing_poly in polygons:
                     if poly.intersects(existing_poly) and not poly.touches(existing_poly):
                         warnings.append(f"🚨 Phát hiện va chạm/chồng lấp giữa '{s['name']}' và chi tiết khác.")
                 polygons.append(poly)
@@ -219,7 +214,7 @@ def check_safety_and_collisions(shapes, bed_w, bed_h):
     return warnings
 
 # ==============================================================================
-# 6. TRÌNH BIÊN DỊCH G-CODE CHUẨN ISO (G2/G3, DRILL, POCKET, PROFILE)
+# 6. TRÌNH BIÊN DỊCH G-CODE CHUẨN ISO
 # ==============================================================================
 def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
     lines = []
@@ -231,7 +226,7 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
 
     lines.append(f"(--- TOOLPATH: {s['name']} | TYPE: {proc_type} ---)")
 
-    # 1. KIỂU KHOAN (DRILL - G81)
+    # 1. KHOAN (DRILL - G81)
     if proc_type == "Drill" or s["type"] == "CIRCLE":
         cx, cy = s["center"]
         lines.append(f"G0 X{cx:.3f} Y{cy:.3f}")
@@ -239,37 +234,38 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
             lines.append(f"G81 X{cx:.3f} Y{cy:.3f} Z{z:.3f} R2.000 F{plunge}")
         lines.append("G80 (Cancel Drill Cycle)")
 
-    # 2. KIỂU ARC CHUẨN G2/G3
+    # 2. ARC (G2/G3)
     elif s["type"] == "ARC":
         cx, cy = s["center"]
         sp, ep = s["start_p"], s["end_p"]
-        r = s["radius"]
-        i_val, j_val = cx - sp[0], cy - sp[1] # Tọa độ tương đối tâm Arc
+        i_val, j_val = cx - sp[0], cy - sp[1]
+        g_cmd = "G2" if s.get("cw", True) else "G3"
         
         lines.append(f"G0 X{sp[0]:.3f} Y{sp[1]:.3f}")
         for z in z_levels:
             lines.append(f"G1 Z{z:.3f} F{plunge}")
-            lines.append(f"G2 X{ep[0]:.3f} Y{ep[ep]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}") if s.get("cw", True) else \
-            lines.append(f"G3 X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
+            lines.append(f"{g_cmd} X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
 
-    # 3. KIỂU PHAY HỐC (POCKET)
+    # 3. PHAY HỐC (POCKET)
     elif proc_type == "Pocket":
         pocket_paths = generate_pocket_toolpaths(s["points"], tool_dia)
         for path_pts in pocket_paths:
+            if not path_pts: continue
             lines.append(f"G0 X{path_pts[0][0]:.3f} Y{path_pts[0][1]:.3f}")
             for z in z_levels:
                 lines.append(f"G1 Z{z:.3f} F{plunge}")
                 for p in path_pts[1:]:
                     lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
 
-    # 4. KIỂU PHAY BIÊN DẠNG (PROFILE / ENGRAVE)
+    # 4. PHAY BIÊN DẠNG (PROFILE / ENGRAVE)
     else:
         actual_pts = apply_tool_offset(s["points"], tool_dia, offset_type) if proc_type == "Profile" else s["points"]
-        lines.append(f"G0 X{actual_pts[0][0]:.3f} Y{actual_pts[0][1]:.3f}")
-        for z in z_levels:
-            lines.append(f"G1 Z{z:.3f} F{plunge}")
-            for p in actual_pts[1:]:
-                lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
+        if actual_pts:
+            lines.append(f"G0 X{actual_pts[0][0]:.3f} Y{actual_pts[0][1]:.3f}")
+            for z in z_levels:
+                lines.append(f"G1 Z{z:.3f} F{plunge}")
+                for p in actual_pts[1:]:
+                    lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
 
     lines.append("G0 Z15.000 (Safe Height Retract)\n")
     return "\n".join(lines)
@@ -277,7 +273,7 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
 def build_full_gcode_program(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, step_down):
     header = [
         "(--- STREAMLIT CAM STUDIO PRO - ISO G-CODE ---)",
-        f"G21 G90 G17 G94",
+        "G21 G90 G17 G94",
         f"{wcs} (Work Coordinate System)",
         f"M3 S{spindle} (Spindle ON CW)",
         "G0 Z15.000",
@@ -298,12 +294,12 @@ def build_full_gcode_program(shapes, wcs, spindle, tool_dia, feed, plunge, targe
     return "\n".join(header + body + footer)
 
 # ==============================================================================
-# 7. GIAO DIỆN STREAMLIT CHÍNH (UI/UX STREAMLIT)
+# 7. GIAO DIỆN STREAMLIT CHÍNH
 # ==============================================================================
 st.set_page_config(page_title="Streamlit CAM Studio Pro v2", layout="wide")
 st.title("⚙️ Streamlit CAM Studio Pro - Full Suite CNC Toolpath")
 
-# SIDEBAR CONFIGURATION
+# SIDEBAR
 st.sidebar.header("🔧 Cấu Hình Máy & Công Nghệ Gia Công")
 wcs_option = st.sidebar.selectbox("Gốc tọa độ WCS", ["G54", "G55", "G56", "G57", "G58", "G59"])
 work_zero_pos = st.sidebar.selectbox("Vị trí Work Zero trên bàn phôi", ["Bottom Left", "Top Left", "Top Right", "Bottom Right", "Center"])
@@ -311,7 +307,7 @@ work_zero_pos = st.sidebar.selectbox("Vị trí Work Zero trên bàn phôi", ["B
 bed_width = st.sidebar.number_input("Chiều rộng bàn cắt X (mm)", value=600.0, step=50.0)
 bed_height = st.sidebar.number_input("Chiều dài bàn cắt Y (mm)", value=400.0, step=50.0)
 
-tool_diameter = st.sidebar.number_input("Đường kính dao Dao Phay (mm)", value=3.175, step=0.1)
+tool_diameter = st.sidebar.number_input("Đường kính dao Phay (mm)", value=3.175, step=0.1)
 target_depth = st.sidebar.number_input("Độ sâu cắt Z (mm)", value=-6.0, step=0.5)
 step_down = st.sidebar.number_input("Chiều sâu mỗi pass Z (mm)", value=2.0, step=0.5)
 
@@ -324,8 +320,8 @@ api_key = st.sidebar.text_input("Gemini API Key (Ảnh bản vẽ)", type="passw
 if "loaded_shapes" not in st.session_state:
     st.session_state["loaded_shapes"] = []
 
-# WORKSPACE - TOP SECTION: FILE UPLOADER (UNLIMITED MULTI-FILE)
-st.subheader("1. 📥 Nạp File DXF & Ảnh Chụp Bản Vẽ (Không giới hạn số lượng)")
+# WORKSPACE - UPLOADER
+st.subheader("1. 📥 Nạp File DXF & Ảnh Chụp Bản Vẽ")
 uploaded_files = st.file_uploader(
     "Thả hoặc chọn nhiều file DXF / Ảnh bản vẽ tại đây", 
     type=["dxf", "png", "jpg", "jpeg"], 
@@ -338,37 +334,37 @@ if uploaded_files and st.button("🔄 Đọc dữ liệu các File đã tải l�
         if f.name.lower().endswith(".dxf"):
             parsed = parse_dxf_geometry_v2(f, f.name)
             all_shapes.extend(parsed)
-        # Giữ lại luồng OpenCV / Hybrid Vision cho file ảnh
     st.session_state["loaded_shapes"] = all_shapes
     st.success(f"Đã trích xuất thành công {len(all_shapes)} đối tượng hình học!")
 
-# MIDDLE SECTION: DRAG-AND-DROP REORDERING & TOOLPATH STRATEGY
+# MIDDLE SECTION
 st.divider()
 col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
-    st.subheader("2. 🔀 Thay đổi Thứ tự cắt (Drag & Drop) & Bật Tối ưu TSP")
+    st.subheader("2. 🔀 Chọn & Sắp xếp Thứ tự cắt")
     
     if st.session_state["loaded_shapes"]:
-        # Thuật toán TSP Tối ưu đường chạy dao tự động
         if st.button("⚡ Tối ưu đường chạy dao ngắn nhất (Nearest Neighbor)"):
             st.session_state["loaded_shapes"] = optimize_toolpath_order(st.session_state["loaded_shapes"])
             st.success("Đã tối ưu thứ tự gia công!")
 
-        # Giao diện kéo thả sắp xếp danh sách cắt
-        items_list = [s["name"] for s in st.session_state["loaded_shapes"]]
-        sorted_items = sort_items(items_list, key="sortable_cam_list")
+        # Giao diện sắp xếp bằng multiselect native của Streamlit
+        all_item_names = [s["name"] for s in st.session_state["loaded_shapes"]]
+        selected_order = st.multiselect(
+            "Chọn/Thay đổi thứ tự danh sách chi tiết gia công (thêm lần lượt theo thứ tự bạn muốn cắt):",
+            options=all_item_names,
+            default=all_item_names
+        )
 
-        # Cập nhật thứ tự mảng dữ liệu dựa trên kéo thả
         reordered_shapes = []
-        for name in sorted_items:
+        for name in selected_order:
             for s in st.session_state["loaded_shapes"]:
                 if s["name"] == name:
                     reordered_shapes.append(s)
                     break
         st.session_state["loaded_shapes"] = reordered_shapes
 
-        # Cấu hình Kiểu gia công & Tool Offset cho từng Shape
         st.write("🛠️ **Cấu hình Kiểu gia công & Tool Offset:**")
         for idx, s in enumerate(st.session_state["loaded_shapes"]):
             c1, c2, c3 = st.columns([2, 1.5, 1.5])
@@ -376,31 +372,29 @@ with col_left:
             with c2: 
                 s["process_type"] = st.selectbox(
                     "Kiểu cắt", ["Profile", "Pocket", "Drill", "Engrave"], 
-                    key=f"proc_{idx}", index=["Profile", "Pocket", "Drill", "Engrave"].index(s.get("process_type", "Profile"))
+                    key=f"proc_{s['name']}_{idx}", 
+                    index=["Profile", "Pocket", "Drill", "Engrave"].index(s.get("process_type", "Profile"))
                 )
             with c3:
                 s["tool_offset"] = st.selectbox(
                     "Offset dao", ["Outside", "Inside", "Center"], 
-                    key=f"off_{idx}", index=["Outside", "Inside", "Center"].index(s.get("tool_offset", "Outside"))
+                    key=f"off_{s['name']}_{idx}", 
+                    index=["Outside", "Inside", "Center"].index(s.get("tool_offset", "Outside"))
                 )
 
 with col_right:
     st.subheader("3. 👁️ Mô Phỏng Bàn Cắt & Cảnh Báo An Toàn")
     
-    # Áp dụng Work Zero đã chọn
     transformed_shapes = apply_work_zero_offset(st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos)
     
-    # Kiểm tra an toàn & va chạm
     safety_warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
     if safety_warnings:
         for w in safety_warnings: st.error(w)
     else:
         st.info("✅ Kiểm tra an toàn: Không phát hiện va chạm hoặc vượt khổ bàn cắt.")
 
-    # Mô phỏng Matplotlib
     fig, ax = plt.subplots(figsize=(6, 5))
     
-    # Thiết lập khung bàn cắt dựa trên Work Zero
     if work_zero_pos == "Bottom Left":
         ax.set_xlim(0, bed_width); ax.set_ylim(0, bed_height)
     elif work_zero_pos == "Center":
@@ -421,18 +415,20 @@ with col_right:
             cx, cy = s["center"]
             circle_patch = plt.Circle((cx, cy), s["radius"], color='g', fill=False, linewidth=1.2)
             ax.add_patch(circle_patch)
+        elif s["type"] == "ARC":
+            sp, ep = s["start_p"], s["end_p"]
+            ax.plot([sp[0], ep[0]], [sp[1], ep[1]], 'g--', linewidth=1.0)
 
     ax.legend(loc="upper right")
     st.pyplot(fig)
 
-# BOTTOM SECTION: G-CODE GENERATION & DOWNLOAD
+# BOTTOM SECTION
 st.divider()
 st.subheader("4. 🚀 Xuất Chương Trình G-Code ISO")
 
 if st.session_state["loaded_shapes"]:
     c_btn1, c_btn2 = st.columns(2)
     
-    # 1. Xuất 1 file G-code tổng
     with c_btn1:
         full_gcode = build_full_gcode_program(
             transformed_shapes, wcs_option, spindle_speed, tool_diameter, 
@@ -443,15 +439,15 @@ if st.session_state["loaded_shapes"]:
             data=full_gcode, file_name="FULL_PROGRAM.nc", mime="text/plain"
         )
 
-    # 2. Xuất từng file G-code riêng lẻ
     with c_btn2:
         st.write("📦 **Tải file G-Code lẻ từng chi tiết:**")
-        for s in transformed_shapes:
+        for idx, s in enumerate(transformed_shapes):
             single_gcode = build_full_gcode_program(
                 [s], wcs_option, spindle_speed, tool_diameter, 
                 feed_rate, plunge_rate, target_depth, step_down
             )
             st.download_button(
                 f"💾 File: {s['name']}.nc", 
-                data=single_gcode, file_name=f"{s['name']}.nc", mime="text/plain"
+                data=single_gcode, file_name=f"{s['name']}.nc", mime="text/plain",
+                key=f"dl_{s['name']}_{idx}"
             )
