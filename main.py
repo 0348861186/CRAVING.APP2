@@ -1,6 +1,8 @@
 import io
 import json
 import math
+import os
+import tempfile
 import time
 from typing import List, Literal, Optional
 
@@ -348,27 +350,42 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
 
 
 # ==============================================================================
-# 3.1. ĐỌC DXF AN TOÀN (ĐÃ SỬA LỖI ĐỌC FILE DXF BINARY VÀ TEXT/ASCII)
+# 3.1. ĐỌC DXF CHUYÊN NGHIỆP (TỰ ĐỘNG GIẢI MÃ BINARY/ASCII & EXPLODE BLOCK)
 # ==============================================================================
 def parse_dxf_with_ezdxf(file_upload, filename):
   shapes = []
+  tmp_path = None
   try:
-    raw_bytes = file_upload.getvalue()
+    # Ghi dữ liệu ra file tạm thời để ezdxf tự phát hiện cấu trúc ASCII hoặc Binary DXF
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
+      tmp_file.write(file_upload.getvalue())
+      tmp_path = tmp_file.name
 
-    # Thử giải mã dạng Text (ASCII DXF). Nếu thất bại sẽ chuyển sang stream BytesIO (Binary DXF)
-    try:
-      text_data = raw_bytes.decode("utf-8", errors="ignore")
-      doc = ezdxf.read(io.StringIO(text_data))
-    except Exception:
-      doc = ezdxf.read(io.BytesIO(raw_bytes))
-
+    doc = ezdxf.readfile(tmp_path)
   except Exception as ex:
     st.error(f"Lỗi đọc DXF ({filename}): {ex}")
+    if tmp_path and os.path.exists(tmp_path):
+      os.remove(tmp_path)
     return []
+
+  finally:
+    if tmp_path and os.path.exists(tmp_path):
+      os.remove(tmp_path)
 
   msp = doc.modelspace()
 
-  for idx, entity in enumerate(msp):
+  # Lấy danh sách các đối tượng (Tự động rã Block/INSERT ra thành các nét vẽ đơn)
+  entities = []
+  for e in msp:
+    if e.dxftype() == "INSERT":
+      try:
+        entities.extend(e.virtual_entities())
+      except Exception:
+        pass
+    else:
+      entities.append(e)
+
+  for idx, entity in enumerate(entities):
     dxftype = entity.dxftype()
     s_name = f"{filename}_{idx+1}_{dxftype}"
 
@@ -846,7 +863,12 @@ if input_type == "DXF (ezdxf)":
     for f in uploaded_dxfs:
       shapes.extend(parse_dxf_with_ezdxf(f, f.name))
     st.session_state["loaded_shapes"] = shapes
-    st.success(f"Đã đọc {len(shapes)} đối tượng từ DXF!")
+    if shapes:
+      st.success(f"Đã đọc {len(shapes)} đối tượng từ DXF!")
+    else:
+      st.warning(
+          "Không tìm thấy hình vẽ hoặc thực thể hợp lệ trong file DXF!"
+      )
 
 else:
   uploaded_imgs = st.file_uploader(
