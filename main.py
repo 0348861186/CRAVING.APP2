@@ -46,43 +46,50 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
     return transformed_shapes
 
 # ==============================================================================
-# 2. HÀM GEMINI VISION AI - XỬ LÝ MỌI LOẠI HÌNH VẼ TAY (ĐÃ TỐI ƯU HOÀN CHỈNH)
+# 2. HÀM GEMINI VISION AI - CHUẨN HÓA KÍCH THƯỚC & CHÍNH XÁC HÌNH HỌC 100%
 # ==============================================================================
 def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
     """
-    Sử dụng Gemini AI để phân tích BẤT KỲ hình dạng nào từ ảnh chụp vẽ tay 
-    (chữ nhật, đa giác, hình tròn, lỗ khoan,...) và xuất tọa độ 2D thực tế (mm).
+    AI chỉ đóng vai trò trích xuất tham số hình học (Kích thước W, H, Bán kính R, Tâm X,Y).
+    Python sẽ tự tạo tọa độ 2D chuẩn xác để tránh méo do góc chụp ảnh.
     """
     try:
         client = genai.Client(api_key=api_key)
         img = Image.open(io.BytesIO(image_bytes))
 
         prompt = """
-        Bạn là một kỹ sư lập trình CAD/CAM chuyên nghiệp.
-        Hãy phân tích TẤT CẢ các đối tượng hình học trong ảnh chụp bản vẽ phác thảo tay (có thể gồm: hình chữ nhật, hình vuông, tam giác, đa giác bất kỳ, hình tròn, lỗ khoan,...).
+        Bạn là một kỹ sư trích xuất tham số CAD/CAM từ ảnh phác thảo tay.
+        Hãy đọc kỹ các CON SỐ KÍCH THƯỚC (mm) ghi trên ảnh và phân loại từng hình dạng.
 
-        QUY TẮC XỬ LÝ KÍCH THƯỚC & TỌA ĐỘ:
-        1. Đọc tất cả các số ghi chú kích thước (tính bằng mm) ghi trên các cạnh, bán kính hoặc đường kính.
-        2. Dựa vào các kích thước đó, tính toán và quy đổi thành hệ tọa độ Đề-các 2D (Cartesian):
-           - Đặt gốc tọa độ (0, 0) tại GÓC DƯỚI BÊN TRÁI của vật thể/chi tiết chính.
-           - Nếu là HÌNH CHỮ NHẬT / HÌNH VUÔNG có kích thước X = W mm và Y = H mm, danh sách điểm 'points' PHẢI LÀ:
-             [[0.0, 0.0], [W, 0.0], [W, H], [0.0, H], [0.0, 0.0]] (Khép kín 5 điểm).
-           - Nếu là ĐA GIÁC / HÌNH PHỨC TẠP, liệt kê danh sách tọa độ các đỉnh 'points' nối tiếp nhau theo chu vi và ĐẢM BẢO KHẾP KÍN (điểm cuối trùng điểm đầu).
-           - Nếu là HÌNH TRÒN / LỖ KHOAN, trích xuất tọa độ tâm 'center': [X, Y] và bán kính 'radius': R.
+        QUY TẮC PHÂN LOẠI & TRÍCH XUẤT THAM SỐ:
+        1. Nếu là HÌNH CHỮ NHẬT / HÌNH VUÔNG:
+           - Trả về 'shape_type': 'RECTANGLE'
+           - Trích xuất 'width': W (chiều rộng mm) và 'height': H (chiều cao mm).
+           - Nếu có vị trí góc dưới bên trái, trả về 'origin': [X, Y] (mặc định [0, 0]).
+
+        2. Nếu là HÌNH TRÒN / LỖ KHOAN:
+           - Trả về 'shape_type': 'CIRCLE'
+           - Trích xuất 'center': [X, Y] (tọa độ tâm mm) và 'radius': R (bán kính mm).
+
+        3. Nếu là HÌNH ĐA GIÁC / HÌNH KHÁC (Tam giác, L-shape, Đa giác):
+           - Trả về 'shape_type': 'POLYGON'
+           - Trích xuất danh sách tọa độ 2D chuẩn 'points': [[x1, y1], [x2, y2], ...] nối tiếp theo chu vi khép kín.
 
         YÊU CẦU ĐẦU RA:
-        Trả về DUY NHẤT mảng JSON hợp lệ (không chứa bất kỳ văn bản giải thích nào khác, không dùng markdown codeblock ```json):
+        Chỉ trả về DUY NHẤT mảng JSON hợp lệ (Không chứa text giải thích, không dùng ```json):
         [
             {
-                "name": "Bien_Dang_Ngoai",
-                "type": "POLYLINE",
-                "points": [[0.0, 0.0], [150.0, 0.0], [150.0, 80.0], [0.0, 80.0], [0.0, 0.0]]
+                "name": "Phoi_Chinh",
+                "shape_type": "RECTANGLE",
+                "width": 200.0,
+                "height": 100.0,
+                "origin": [0.0, 0.0]
             },
             {
                 "name": "Lo_Khoan_1",
-                "type": "CIRCLE",
-                "center": [30.0, 40.0],
-                "radius": 5.0
+                "shape_type": "CIRCLE",
+                "center": [50.0, 50.0],
+                "radius": 10.0
             }
         ]
         """
@@ -94,7 +101,7 @@ def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
 
         raw_text = response.text.strip()
 
-        # Trích xuất chuỗi JSON bằng Regex để loại bỏ tạp chất markdown
+        # Dọn dẹp JSON
         json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         if json_match:
             raw_text = json_match.group(0)
@@ -104,9 +111,30 @@ def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
 
         for idx, item in enumerate(data):
             s_name = f"{filename}_{item.get('name', f'shape_{idx+1}')}"
-            stype = str(item.get("type", "POLYLINE")).upper()
+            stype = str(item.get("shape_type", "POLYGON")).upper()
             
-            if stype == "CIRCLE":
+            if stype == "RECTANGLE":
+                w = float(item.get("width", 100.0))
+                h = float(item.get("height", 100.0))
+                ox, oy = item.get("origin", [0.0, 0.0])
+                
+                # PYTHON TỰ NỐI 4 GÓC CHUẨN XÁC HÌNH CHỮ NHẬT
+                rect_pts = [
+                    (ox, oy),
+                    (ox + w, oy),
+                    (ox + w, oy + h),
+                    (ox, oy + h),
+                    (ox, oy)  # Khép kín
+                ]
+                shapes.append({
+                    "name": s_name,
+                    "type": "POLYLINE",
+                    "points": rect_pts,
+                    "process_type": "Profile",
+                    "tool_offset": "Outside"
+                })
+
+            elif stype == "CIRCLE":
                 shapes.append({
                     "name": s_name,
                     "type": "CIRCLE",
@@ -115,9 +143,9 @@ def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
                     "process_type": "Drill",
                     "tool_offset": "Center"
                 })
-            else:
-                pts = [(float(p[0]), float(p[1])) for p in item["points"]]
-                # Tự động khép kín đường chạy dao nếu AI trả về thiếu điểm nối
+
+            else:  # POLYGON
+                pts = [(float(p[0]), float(p[1])) for p in item.get("points", [])]
                 if pts and pts[0] != pts[-1]:
                     pts.append(pts[0])
                     
