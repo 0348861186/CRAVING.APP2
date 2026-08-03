@@ -4,5 +4,5 @@ opencv-python-headless
 ezdxf
 shapely
 matplotlib
-pillow
-google-generativeai
+Pillow
+streamlit-sortable
