@@ -1,299 +1,457 @@
-import io
-import cv2
-import numpy as np
-from PIL import Image
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import pipeline
-import plotly.graph_objects as go
 import streamlit as st
+import numpy as np
+import cv2
+import ezdxf
+from ezdxf import path
+import math
+import json
+import io
+from PIL import Image
+import google.generativeai as genai
+import matplotlib.pyplot as plt
 
-# Tối ưu hóa giới hạn CPU để tránh bị Streamlit Cloud Throttle
-torch.set_num_threads(1)
-
-# ==============================================================================
-# 1. KIẾN TRÚC REAL-ESRGAN (RRDBNET) & THUẬT TOÁN CHIA TILE
-# ==============================================================================
-class ResidualDenseBlock_5C(nn.Module):
-    def __init__(self, nf=64, gc=32, bias=True):
-        super(ResidualDenseBlock_5C, self).__init__()
-        self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1, bias=bias)
-        self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1, bias=bias)
-        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, 1, 1, bias=bias)
-        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, 1, 1, bias=bias)
-        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1, bias=bias)
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-
-    def forward(self, x):
-        x1 = self.lrelu(self.conv1(x))
-        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
-        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
-        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
-        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
-        return x5 * 0.2 + x
-
-class RRDB(nn.Module):
-    def __init__(self, nf, gc=32):
-        super(RRDB, self).__init__()
-        self.rdb1 = ResidualDenseBlock_5C(nf, gc)
-        self.rdb2 = ResidualDenseBlock_5C(nf, gc)
-        self.rdb3 = ResidualDenseBlock_5C(nf, gc)
-
-    def forward(self, x):
-        return self.rdb1(x) * 0.2 + self.rdb2(x) * 0.2 + self.rdb3(x) * 0.2 + x
-
-class RRDBNet(nn.Module):
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4):
-        super(RRDBNet, self).__init__()
-        self.scale = scale
-        self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1, bias=True)
-        self.body = nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
-        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
-
-        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
-        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
-        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=True)
-        self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1, bias=True)
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-
-    def forward(self, x):
-        feat = self.conv_first(x)
-        body_feat = self.conv_body(self.body(feat))
-        feat = feat + body_feat
-        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
-        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
-        out = self.conv_last(self.lrelu(self.conv_hr(feat)))
-        return out
-
-def enhance_tile_process(img_np, model, device, tile_size=200, tile_pad=10, scale=4):
-    """Cắt tile nhỏ 200px để chống tràn VRAM/RAM"""
-    img_tensor = torch.from_numpy(np.transpose(img_np, (2, 0, 1))).float() / 255.0
-    img_tensor = img_tensor.unsqueeze(0).to(device)
-
-    b, c, h, w = img_tensor.size()
-    output_shape = (b, c, h * scale, w * scale)
-    output = torch.zeros(output_shape, device=device)
-
-    tiles_x = (w + tile_size - 1) // tile_size
-    tiles_y = (h + tile_size - 1) // tile_size
-
-    for y in range(tiles_y):
-        for x in range(tiles_x):
-            ofs_x = x * tile_size
-            ofs_y = y * tile_size
-
-            input_start_x = max(ofs_x - tile_pad, 0)
-            input_end_x = min(ofs_x + tile_size + tile_pad, w)
-            input_start_y = max(ofs_y - tile_pad, 0)
-            input_end_y = min(ofs_y + tile_size + tile_pad, h)
-
-            input_tile = img_tensor[:, :, input_start_y:input_end_y, input_start_x:input_end_x]
-
-            with torch.no_grad():
-                output_tile = model(input_tile)
-
-            output_start_x = input_start_x * scale
-            output_end_x = input_end_x * scale
-            output_start_y = input_start_y * scale
-            output_end_y = input_end_y * scale
-
-            target_start_x = ofs_x * scale
-            target_end_x = min((ofs_x + tile_size) * scale, w * scale)
-            target_start_y = ofs_y * scale
-            target_end_y = min((ofs_y + tile_size) * scale, h * scale)
-
-            tile_slice_x_start = (target_start_x - output_start_x)
-            tile_slice_x_end = tile_slice_x_start + (target_end_x - target_start_x)
-            tile_slice_y_start = (target_start_y - output_start_y)
-            tile_slice_y_end = tile_slice_y_start + (target_end_y - target_start_y)
-
-            output[:, :, target_start_y:target_end_y, target_start_x:target_end_x] = \
-                output_tile[:, :, tile_slice_y_start:tile_slice_y_end, tile_slice_x_start:tile_slice_x_end]
-
-    output_np = output.squeeze().float().cpu().clamp_(0, 1).numpy()
-    output_np = np.transpose(output_np, (1, 2, 0))
-    return (output_np * 255.0).round().astype(np.uint8)
+from shapely.geometry import Polygon, LineString, Point, MultiPolygon
+from shapely.affinity import translate, rotate
+from streamlit_sortable import sort_items  # Cần pip install streamlit-sortable
 
 # ==============================================================================
-# 2. KHỞI TẠO VÀ CACHE MÔ HÌNH AI
+# 1. BÀN CẮT VÀ CHUYỂN ĐỔI GỐC TỌA ĐỘ (WORK ZERO ALIGNMENT)
 # ==============================================================================
-st.set_page_config(page_title="AI Ultra 3D CNC - Aspire Optimization 16-Bit", layout="wide")
+def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
+    """
+    Dịch chuyển tọa độ của các shape dựa trên Work Zero (Origin) được chọn.
+    Bottom Left (0,0) -> Giữ nguyên.
+    Top Left -> Y_new = Y - bed_h
+    Top Right -> X_new = X - bed_w, Y_new = Y - bed_h
+    Bottom Right -> X_new = X - bed_w
+    Center -> X_new = X - bed_w/2, Y_new = Y - bed_h/2
+    """
+    offset_x, offset_y = 0.0, 0.0
+    if work_zero == "Top Left":
+        offset_y = -bed_h
+    elif work_zero == "Top Right":
+        offset_x, offset_y = -bed_w, -bed_h
+    elif work_zero == "Bottom Right":
+        offset_x = -bed_w
+    elif work_zero == "Center":
+        offset_x, offset_y = -bed_w / 2.0, -bed_h / 2.0
 
-@st.cache_resource
-def load_real_esrgan_model():
-    device = torch.device('cpu')
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-    checkpoint = torch.hub.load_state_dict_from_url(model_url, map_location=device)
-    state_dict = checkpoint.get('params_ema', checkpoint.get('params', checkpoint))
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-    return model, device
-
-@st.cache_resource
-def load_depth_model():
-    return pipeline(task="depth-estimation", model="LiheYoung/depth-anything-small-hf", device=-1)
+    transformed_shapes = []
+    for shape in shapes:
+        new_shape = shape.copy()
+        if "points" in shape:
+            new_shape["points"] = [(p[0] + offset_x, p[1] + offset_y) for p in shape["points"]]
+        if "center" in shape:
+            cx, cy = shape["center"]
+            new_shape["center"] = (cx + offset_x, cy + offset_y)
+        transformed_shapes.append(new_shape)
+        
+    return transformed_shapes
 
 # ==============================================================================
-# 3. HÀM XỬ LÝ HÌNH ẢNH & NORMAL MAP
+# 2. XỬ LÝ NÂNG CẤP HÌNH HỌC DXF (HỖ TRỢ ARC & CIRCLE NGUYÊN BẢN G2/G3)
 # ==============================================================================
-def generate_normal_map(depth_float_norm, strength=1.5):
-    zy, zx = np.gradient(depth_float_norm)
-    zx, zy = zx * strength, zy * strength
-    normal = np.dstack((-zx, -zy, np.ones_like(depth_float_norm)))
-    n = np.linalg.norm(normal, axis=2, keepdims=True)
-    return ((normal / n + 1) / 2.0 * 255).astype(np.uint8)
+def parse_dxf_geometry_v2(file_bytes, filename):
+    try:
+        content = file_bytes.getvalue().decode('utf-8', errors='ignore')
+        doc = ezdxf.read(io.StringIO(content))
+    except Exception:
+        try:
+            doc = ezdxf.read(io.BytesIO(file_bytes.getvalue()))
+        except Exception as ex:
+            st.error(f"Lỗi đọc file DXF ({filename}): {ex}")
+            return []
 
-# ==============================================================================
-# 4. GIAO DIỆN STREAMLIT
-# ==============================================================================
-st.title("🛠️ Tool Tối Ưu Ảnh AI 3D CNC Pro (Xuất 16-Bit Cho Aspire)")
+    msp = doc.modelspace()
+    shapes = []
 
-# Sidebar Configuration
-st.sidebar.header("⚙️ Tùy chỉnh tham số AI & CNC")
-use_esrgan = st.sidebar.checkbox("Bật AI Super-Resolution (Real-ESRGAN 4x)", value=False)
-remove_bg = st.sidebar.checkbox("Tách loại bỏ nền tự động (Rembg)", value=False)
-use_ai_depth = st.sidebar.checkbox("Bật AI Depth Estimation (Depth Anything 3D)", value=True)
+    for idx, entity in enumerate(msp):
+        dxftype = entity.dxftype()
+        s_name = f"{filename}_{idx+1}_{dxftype}"
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📐 Tối ưu Height Map & Lọc bề mặt")
-use_denoise = st.sidebar.checkbox("Bật AI Denoise (Khử hạt nhiễu)", value=True)
-denoise_strength = st.sidebar.slider("Cường độ Denoise", 3, 20, 7)
-blur_strength = st.sidebar.slider("Độ mịn bề mặt (Bilateral Filter)", 1, 15, 5, step=2)
-gamma_val = st.sidebar.slider("Độ dốc khối (Gamma Curved)", 0.3, 2.5, 1.0, step=0.1)
-invert_z = st.sidebar.checkbox("🔄 Đảo ngược chiều Z (Invert Lồi/Lõm)", value=False)
-normal_strength = st.sidebar.slider("Độ sâu Normal Map", 0.5, 5.0, 1.5, step=0.1)
+        if dxftype == 'CIRCLE':
+            center = (float(entity.dxf.center.x), float(entity.dxf.center.y))
+            radius = float(entity.dxf.radius)
+            shapes.append({
+                "name": s_name, "type": "CIRCLE", "center": center, "radius": radius,
+                "process_type": "Drill", "tool_offset": "Center"
+            })
 
-uploaded_file = st.file_uploader("Tải ảnh từ khách hàng (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
+        elif dxftype == 'ARC':
+            center = (float(entity.dxf.center.x), float(entity.dxf.center.y))
+            radius = float(entity.dxf.radius)
+            start_angle = float(entity.dxf.start_angle)
+            end_angle = float(entity.dxf.end_angle)
+            
+            # Tính điểm bắt đầu và kết thúc
+            sa_rad, ea_rad = math.radians(start_angle), math.radians(end_angle)
+            start_p = (center[0] + radius * math.cos(sa_rad), center[1] + radius * math.sin(sa_rad))
+            end_p = (center[0] + radius * math.cos(ea_rad), center[1] + radius * math.sin(ea_rad))
 
-if uploaded_file is not None:
-    image_input = Image.open(uploaded_file).convert("RGB")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("🖼️ Ảnh gốc")
-        st.image(image_input, use_container_width=True)
-        st.caption(f"Kích thước gốc: {image_input.width} x {image_input.height} px")
+            shapes.append({
+                "name": s_name, "type": "ARC", "center": center, "radius": radius,
+                "start_angle": start_angle, "end_angle": end_angle,
+                "start_p": start_p, "end_p": end_p,
+                "process_type": "Profile", "tool_offset": "OnLine"
+            })
 
-    with st.spinner("🚀 AI đang xử lý (Depth Anything 16-Bit & Filtering)..."):
-        # 1. Tách nền (Nạp chậm Lazy Loading rembg để tránh sập app)
-        alpha_mask = None
-        if remove_bg:
+        elif dxftype in ['LWPOLYLINE', 'POLYLINE', 'ELLIPSE', 'SPLINE', 'LINE']:
             try:
-                from rembg import remove as rembg_remove
-                img_no_bg = rembg_remove(image_input)
-                img_np_bg = np.array(img_no_bg)
-                if img_np_bg.shape[2] == 4:
-                    alpha_mask = img_np_bg[:, :, 3]
-                image_proc = img_no_bg.convert("RGB")
-            except Exception as e:
-                st.warning("Không thể khởi chạy Rembg do giới hạn RAM. Đang chuyển sang xử lý mặc định.")
-                image_proc = image_input
-        else:
-            image_proc = image_input
+                p = path.make_path(entity)
+                vertices = list(path.to_vertices(p, distance=0.05))
+                pts = [(float(v.x), float(v.y)) for v in vertices]
+                if len(pts) >= 2:
+                    shapes.append({
+                        "name": s_name, "type": "POLYLINE", "points": pts,
+                        "process_type": "Profile", "tool_offset": "Outside"
+                    })
+            except Exception:
+                continue
 
-        # 2. Upscale Real-ESRGAN
-        img_np = np.array(image_proc)
-        if use_esrgan:
-            esr_model, device = load_real_esrgan_model()
-            upscaled_np = enhance_tile_process(img_np, esr_model, device, tile_size=200, scale=4)
-        else:
-            upscaled_np = img_np
+    return shapes
 
-        # 3. Denoise
-        if use_denoise:
-            upscaled_np = cv2.fastNlMeansDenoisingColored(
-                upscaled_np, None, h=denoise_strength, hColor=denoise_strength, templateWindowSize=7, searchWindowSize=21
+# ==============================================================================
+# 3. HỖ TRỢ TOOL OFFSET (INSIDE / OUTSIDE / CENTER) & POCKET PASSES
+# ==============================================================================
+def apply_tool_offset(pts, tool_dia, offset_type):
+    if len(pts) < 3 or offset_type == "Center" or offset_type == "OnLine":
+        return pts
+    
+    poly = Polygon(pts)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+
+    radius = tool_dia / 2.0
+    buffer_dist = radius if offset_type == "Outside" else -radius
+
+    offset_poly = poly.buffer(buffer_dist)
+    if offset_poly.is_empty:
+        return pts # Trả về điểm gốc nếu dao quá to không offset được
+    
+    if isinstance(offset_poly, Polygon):
+        return list(offset_poly.exterior.coords)
+    elif isinstance(offset_poly, MultiPolygon):
+        return list(offset_poly.geoms[0].exterior.coords)
+    return pts
+
+def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
+    """Tạo chuỗi đường cắt dạng Spiral Inset cho phay hốc (Pocket)."""
+    poly = Polygon(pts)
+    if not poly.is_valid: poly = poly.buffer(0)
+
+    step = tool_dia * stepover_ratio
+    paths = []
+    current_poly = poly.buffer(-tool_dia / 2.0)
+
+    while not current_poly.is_empty:
+        if isinstance(current_poly, Polygon):
+            paths.append(list(current_poly.exterior.coords))
+            current_poly = current_poly.buffer(-step)
+        elif isinstance(current_poly, MultiPolygon):
+            for p in current_poly.geoms:
+                paths.append(list(p.exterior.coords))
+            current_poly = current_poly.buffer(-step)
+        else:
+            break
+    return paths
+
+# ==============================================================================
+# 4. TỐI ƯU THỨ TỰ CHẠY DAO (NEAREST NEIGHBOR / TSP)
+# ==============================================================================
+def optimize_toolpath_order(shapes):
+    if not shapes: return []
+    
+    def get_start_point(s):
+        if s["type"] in ["POLYLINE", "POCKET"]: return s["points"][0]
+        elif s["type"] in ["CIRCLE", "DRILL"]: return s["center"]
+        elif s["type"] == "ARC": return s["start_p"]
+        return (0, 0)
+
+    unvisited = shapes.copy()
+    optimized = []
+    current_pos = (0.0, 0.0)
+
+    while unvisited:
+        nearest_idx = 0
+        min_dist = float('inf')
+
+        for idx, s in enumerate(unvisited):
+            sp = get_start_point(s)
+            dist = math.hypot(sp[0] - current_pos[0], sp[1] - current_pos[1])
+            if dist < min_dist:
+                min_dist = dist
+                nearest_idx = idx
+
+        selected_shape = unvisited.pop(nearest_idx)
+        optimized.append(selected_shape)
+        current_pos = get_start_point(selected_shape)
+
+    return optimized
+
+# ==============================================================================
+# 5. KIỂM TRA VA CHẠM VÀ VƯỢT KHỔ BÀN CẮT
+# ==============================================================================
+def check_safety_and_collisions(shapes, bed_w, bed_h):
+    warnings = []
+    polygons = []
+
+    for s in shapes:
+        pts = []
+        if s["type"] in ["POLYLINE", "POCKET"] and "points" in s:
+            pts = s["points"]
+        elif s["type"] in ["CIRCLE", "DRILL"]:
+            cx, cy = s["center"]
+            r = s.get("radius", 5)
+            pts = [(cx + r*math.cos(a), cy + r*math.sin(a)) for a in np.linspace(0, 2*math.pi, 16)]
+
+        if pts:
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            if min(xs) < 0 or max(xs) > bed_w or min(ys) < 0 or max(ys) > bed_h:
+                warnings.append(f"⚠️ Chi tiết '{s['name']}' vượt ra ngoài vùng làm việc bàn cắt ({bed_w}x{bed_h}mm).")
+
+            poly = Polygon(pts)
+            if poly.is_valid:
+                for idx, existing_poly in enumerate(polygons):
+                    if poly.intersects(existing_poly) and not poly.touches(existing_poly):
+                        warnings.append(f"🚨 Phát hiện va chạm/chồng lấp giữa '{s['name']}' và chi tiết khác.")
+                polygons.append(poly)
+
+    return warnings
+
+# ==============================================================================
+# 6. TRÌNH BIÊN DỊCH G-CODE CHUẨN ISO (G2/G3, DRILL, POCKET, PROFILE)
+# ==============================================================================
+def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
+    lines = []
+    proc_type = s.get("process_type", "Profile")
+    offset_type = s.get("tool_offset", "Outside")
+    total_depth = abs(target_z)
+    num_passes = math.ceil(total_depth / abs(step_down))
+    z_levels = [-min((i + 1) * abs(step_down), total_depth) for i in range(num_passes)]
+
+    lines.append(f"(--- TOOLPATH: {s['name']} | TYPE: {proc_type} ---)")
+
+    # 1. KIỂU KHOAN (DRILL - G81)
+    if proc_type == "Drill" or s["type"] == "CIRCLE":
+        cx, cy = s["center"]
+        lines.append(f"G0 X{cx:.3f} Y{cy:.3f}")
+        for z in z_levels:
+            lines.append(f"G81 X{cx:.3f} Y{cy:.3f} Z{z:.3f} R2.000 F{plunge}")
+        lines.append("G80 (Cancel Drill Cycle)")
+
+    # 2. KIỂU ARC CHUẨN G2/G3
+    elif s["type"] == "ARC":
+        cx, cy = s["center"]
+        sp, ep = s["start_p"], s["end_p"]
+        r = s["radius"]
+        i_val, j_val = cx - sp[0], cy - sp[1] # Tọa độ tương đối tâm Arc
+        
+        lines.append(f"G0 X{sp[0]:.3f} Y{sp[1]:.3f}")
+        for z in z_levels:
+            lines.append(f"G1 Z{z:.3f} F{plunge}")
+            lines.append(f"G2 X{ep[0]:.3f} Y{ep[ep]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}") if s.get("cw", True) else \
+            lines.append(f"G3 X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
+
+    # 3. KIỂU PHAY HỐC (POCKET)
+    elif proc_type == "Pocket":
+        pocket_paths = generate_pocket_toolpaths(s["points"], tool_dia)
+        for path_pts in pocket_paths:
+            lines.append(f"G0 X{path_pts[0][0]:.3f} Y{path_pts[0][1]:.3f}")
+            for z in z_levels:
+                lines.append(f"G1 Z{z:.3f} F{plunge}")
+                for p in path_pts[1:]:
+                    lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
+
+    # 4. KIỂU PHAY BIÊN DẠNG (PROFILE / ENGRAVE)
+    else:
+        actual_pts = apply_tool_offset(s["points"], tool_dia, offset_type) if proc_type == "Profile" else s["points"]
+        lines.append(f"G0 X{actual_pts[0][0]:.3f} Y{actual_pts[0][1]:.3f}")
+        for z in z_levels:
+            lines.append(f"G1 Z{z:.3f} F{plunge}")
+            for p in actual_pts[1:]:
+                lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
+
+    lines.append("G0 Z15.000 (Safe Height Retract)\n")
+    return "\n".join(lines)
+
+def build_full_gcode_program(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, step_down):
+    header = [
+        "(--- STREAMLIT CAM STUDIO PRO - ISO G-CODE ---)",
+        f"G21 G90 G17 G94",
+        f"{wcs} (Work Coordinate System)",
+        f"M3 S{spindle} (Spindle ON CW)",
+        "G0 Z15.000",
+        "G4 P2.0\n"
+    ]
+    
+    body = []
+    for s in shapes:
+        body.append(compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down))
+
+    footer = [
+        "(--- PROGRAM END ---)",
+        "G0 Z15.000",
+        "M5 M9",
+        f"{wcs} G0 X0.000 Y0.000",
+        "M30"
+    ]
+    return "\n".join(header + body + footer)
+
+# ==============================================================================
+# 7. GIAO DIỆN STREAMLIT CHÍNH (UI/UX STREAMLIT)
+# ==============================================================================
+st.set_page_config(page_title="Streamlit CAM Studio Pro v2", layout="wide")
+st.title("⚙️ Streamlit CAM Studio Pro - Full Suite CNC Toolpath")
+
+# SIDEBAR CONFIGURATION
+st.sidebar.header("🔧 Cấu Hình Máy & Công Nghệ Gia Công")
+wcs_option = st.sidebar.selectbox("Gốc tọa độ WCS", ["G54", "G55", "G56", "G57", "G58", "G59"])
+work_zero_pos = st.sidebar.selectbox("Vị trí Work Zero trên bàn phôi", ["Bottom Left", "Top Left", "Top Right", "Bottom Right", "Center"])
+
+bed_width = st.sidebar.number_input("Chiều rộng bàn cắt X (mm)", value=600.0, step=50.0)
+bed_height = st.sidebar.number_input("Chiều dài bàn cắt Y (mm)", value=400.0, step=50.0)
+
+tool_diameter = st.sidebar.number_input("Đường kính dao Dao Phay (mm)", value=3.175, step=0.1)
+target_depth = st.sidebar.number_input("Độ sâu cắt Z (mm)", value=-6.0, step=0.5)
+step_down = st.sidebar.number_input("Chiều sâu mỗi pass Z (mm)", value=2.0, step=0.5)
+
+feed_rate = st.sidebar.number_input("Tốc độ cắt Feedrate (mm/p)", value=1800, step=100)
+plunge_rate = st.sidebar.number_input("Tốc độ cắm dao Plunge (mm/p)", value=400, step=50)
+spindle_speed = st.sidebar.number_input("Tốc độ Trục chính Spindle (RPM)", value=18000, step=1000)
+
+api_key = st.sidebar.text_input("Gemini API Key (Ảnh bản vẽ)", type="password")
+
+if "loaded_shapes" not in st.session_state:
+    st.session_state["loaded_shapes"] = []
+
+# WORKSPACE - TOP SECTION: FILE UPLOADER (UNLIMITED MULTI-FILE)
+st.subheader("1. 📥 Nạp File DXF & Ảnh Chụp Bản Vẽ (Không giới hạn số lượng)")
+uploaded_files = st.file_uploader(
+    "Thả hoặc chọn nhiều file DXF / Ảnh bản vẽ tại đây", 
+    type=["dxf", "png", "jpg", "jpeg"], 
+    accept_multiple_files=True
+)
+
+if uploaded_files and st.button("🔄 Đọc dữ liệu các File đã tải lên"):
+    all_shapes = []
+    for f in uploaded_files:
+        if f.name.lower().endswith(".dxf"):
+            parsed = parse_dxf_geometry_v2(f, f.name)
+            all_shapes.extend(parsed)
+        # Giữ lại luồng OpenCV / Hybrid Vision cho file ảnh
+    st.session_state["loaded_shapes"] = all_shapes
+    st.success(f"Đã trích xuất thành công {len(all_shapes)} đối tượng hình học!")
+
+# MIDDLE SECTION: DRAG-AND-DROP REORDERING & TOOLPATH STRATEGY
+st.divider()
+col_left, col_right = st.columns([1.2, 1])
+
+with col_left:
+    st.subheader("2. 🔀 Thay đổi Thứ tự cắt (Drag & Drop) & Bật Tối ưu TSP")
+    
+    if st.session_state["loaded_shapes"]:
+        # Thuật toán TSP Tối ưu đường chạy dao tự động
+        if st.button("⚡ Tối ưu đường chạy dao ngắn nhất (Nearest Neighbor)"):
+            st.session_state["loaded_shapes"] = optimize_toolpath_order(st.session_state["loaded_shapes"])
+            st.success("Đã tối ưu thứ tự gia công!")
+
+        # Giao diện kéo thả sắp xếp danh sách cắt
+        items_list = [s["name"] for s in st.session_state["loaded_shapes"]]
+        sorted_items = sort_items(items_list, key="sortable_cam_list")
+
+        # Cập nhật thứ tự mảng dữ liệu dựa trên kéo thả
+        reordered_shapes = []
+        for name in sorted_items:
+            for s in st.session_state["loaded_shapes"]:
+                if s["name"] == name:
+                    reordered_shapes.append(s)
+                    break
+        st.session_state["loaded_shapes"] = reordered_shapes
+
+        # Cấu hình Kiểu gia công & Tool Offset cho từng Shape
+        st.write("🛠️ **Cấu hình Kiểu gia công & Tool Offset:**")
+        for idx, s in enumerate(st.session_state["loaded_shapes"]):
+            c1, c2, c3 = st.columns([2, 1.5, 1.5])
+            with c1: st.caption(f"**{s['name']}**")
+            with c2: 
+                s["process_type"] = st.selectbox(
+                    "Kiểu cắt", ["Profile", "Pocket", "Drill", "Engrave"], 
+                    key=f"proc_{idx}", index=["Profile", "Pocket", "Drill", "Engrave"].index(s.get("process_type", "Profile"))
+                )
+            with c3:
+                s["tool_offset"] = st.selectbox(
+                    "Offset dao", ["Outside", "Inside", "Center"], 
+                    key=f"off_{idx}", index=["Outside", "Inside", "Center"].index(s.get("tool_offset", "Outside"))
+                )
+
+with col_right:
+    st.subheader("3. 👁️ Mô Phỏng Bàn Cắt & Cảnh Báo An Toàn")
+    
+    # Áp dụng Work Zero đã chọn
+    transformed_shapes = apply_work_zero_offset(st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos)
+    
+    # Kiểm tra an toàn & va chạm
+    safety_warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
+    if safety_warnings:
+        for w in safety_warnings: st.error(w)
+    else:
+        st.info("✅ Kiểm tra an toàn: Không phát hiện va chạm hoặc vượt khổ bàn cắt.")
+
+    # Mô phỏng Matplotlib
+    fig, ax = plt.subplots(figsize=(6, 5))
+    
+    # Thiết lập khung bàn cắt dựa trên Work Zero
+    if work_zero_pos == "Bottom Left":
+        ax.set_xlim(0, bed_width); ax.set_ylim(0, bed_height)
+    elif work_zero_pos == "Center":
+        ax.set_xlim(-bed_width/2, bed_width/2); ax.set_ylim(-bed_height/2, bed_height/2)
+    else:
+        ax.set_xlim(-bed_width, bed_width); ax.set_ylim(-bed_height, bed_height)
+
+    ax.set_aspect('equal')
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.axhline(0, color='red', linewidth=1); ax.axvline(0, color='red', linewidth=1)
+    ax.plot(0, 0, 'rX', markersize=10, label=f"Work Zero {wcs_option}")
+
+    for s in transformed_shapes:
+        if "points" in s:
+            pts = np.array(s["points"])
+            ax.plot(pts[:, 0], pts[:, 1], 'b-', linewidth=1.2)
+        elif s["type"] == "CIRCLE":
+            cx, cy = s["center"]
+            circle_patch = plt.Circle((cx, cy), s["radius"], color='g', fill=False, linewidth=1.2)
+            ax.add_patch(circle_patch)
+
+    ax.legend(loc="upper right")
+    st.pyplot(fig)
+
+# BOTTOM SECTION: G-CODE GENERATION & DOWNLOAD
+st.divider()
+st.subheader("4. 🚀 Xuất Chương Trình G-Code ISO")
+
+if st.session_state["loaded_shapes"]:
+    c_btn1, c_btn2 = st.columns(2)
+    
+    # 1. Xuất 1 file G-code tổng
+    with c_btn1:
+        full_gcode = build_full_gcode_program(
+            transformed_shapes, wcs_option, spindle_speed, tool_diameter, 
+            feed_rate, plunge_rate, target_depth, step_down
+        )
+        st.download_button(
+            "💾 Tải File G-Code TỔNG (.nc)", 
+            data=full_gcode, file_name="FULL_PROGRAM.nc", mime="text/plain"
+        )
+
+    # 2. Xuất từng file G-code riêng lẻ
+    with c_btn2:
+        st.write("📦 **Tải file G-Code lẻ từng chi tiết:**")
+        for s in transformed_shapes:
+            single_gcode = build_full_gcode_program(
+                [s], wcs_option, spindle_speed, tool_diameter, 
+                feed_rate, plunge_rate, target_depth, step_down
             )
-
-        # 4. Tạo Depth Map
-        if use_ai_depth:
-            depth_pipe = load_depth_model()
-            depth_pil = depth_pipe(Image.fromarray(upscaled_np))["depth"]
-            depth_raw = np.array(depth_pil, dtype=np.float32)
-        else:
-            depth_raw = cv2.cvtColor(upscaled_np, cv2.COLOR_RGB2GRAY).astype(np.float32)
-
-        # 5. Chuẩn hóa dải float32 [0.0, 1.0]
-        d_min, d_max = depth_raw.min(), depth_raw.max()
-        if d_max - d_min > 0:
-            depth_norm = (depth_raw - d_min) / (d_max - d_min)
-        else:
-            depth_norm = np.zeros_like(depth_raw, dtype=np.float32)
-
-        if invert_z:
-            depth_norm = 1.0 - depth_norm
-
-        if gamma_val != 1.0:
-            depth_norm = np.power(depth_norm, gamma_val)
-
-        if alpha_mask is not None:
-            mask_resized = cv2.resize(alpha_mask, (depth_norm.shape[1], depth_norm.shape[0]))
-            depth_norm[mask_resized == 0] = 0.0
-
-        # 6. Chuyển sang 16-bit & Lọc mịn
-        depth_16bit_f = depth_norm * 65535.0
-        smoothed = cv2.bilateralFilter(depth_16bit_f.astype(np.float32), d=blur_strength, sigmaColor=75, sigmaSpace=75)
-
-        if alpha_mask is not None:
-            smoothed[mask_resized == 0] = 0.0
-
-        final_depth_16bit = np.clip(smoothed, 0, 65535).astype(np.uint16)
-
-        # 7. Normal Map
-        normal_np = generate_normal_map(depth_norm, strength=normal_strength)
-
-        depth_img_16bit = Image.fromarray(final_depth_16bit, mode="I;16")
-        normal_img = Image.fromarray(normal_np)
-
-        preview_8bit = (final_depth_16bit / 256).astype(np.uint8)
-
-    with col2:
-        st.subheader("✨ AI Depth Map 16-Bit (Chuẩn Aspire Relief)")
-        st.image(preview_8bit, use_container_width=True)
-        st.caption(f"Kích thước sau xử lý: {depth_img_16bit.width} x {depth_img_16bit.height} px")
-
-    st.markdown("---")
-    st.subheader("🗺️ Normal Map")
-    st.image(normal_img, use_container_width=True)
-
-    # 3D Interactive Preview
-    st.markdown("---")
-    st.subheader("🧊 Mô phỏng xem trước Relief 3D")
-    preview_size = 120
-    depth_small = cv2.resize(final_depth_16bit, (preview_size, preview_size)).astype(np.float32) / 65535.0
-    x = np.linspace(0, 1, preview_size)
-    y = np.linspace(0, 1, preview_size)
-    X, Y = np.meshgrid(x, y)
-    Z = np.flipud(depth_small)
-
-    fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Earth')])
-    fig.update_layout(
-        title='Mô hình 3D Relief',
-        autosize=False, width=700, height=450,
-        margin=dict(l=10, r=10, b=10, t=40),
-        scene=dict(zaxis=dict(range=[0, 1]))
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Nút Tải File
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        buf_depth = io.BytesIO()
-        depth_img_16bit.save(buf_depth, format="PNG")
-        st.download_button(
-            "💾 Tải Depth Map 16-Bit (.PNG cho Aspire)",
-            data=buf_depth.getvalue(),
-            file_name="cnc_ai_depthmap_16bit.png",
-            mime="image/png"
-        )
-    with col_dl2:
-        buf_normal = io.BytesIO()
-        normal_img.save(buf_normal, format="PNG")
-        st.download_button(
-            "💾 Tải Normal Map (PNG HQ)",
-            data=buf_normal.getvalue(),
-            file_name="cnc_ai_normalmap.png",
-            mime="image/png"
-        )
+            st.download_button(
+                f"💾 File: {s['name']}.nc", 
+                data=single_gcode, file_name=f"{s['name']}.nc", mime="text/plain"
+            )
