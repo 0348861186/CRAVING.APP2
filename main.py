@@ -38,7 +38,7 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
             new_shape["center"] = (cx + offset_x, cy + offset_y)
         if "start_p" in shape and "end_p" in shape:
             sx, sy = shape["start_p"]
-            ex, ey = shape["start_p"]
+            ex, ey = shape["end_p"]
             new_shape["start_p"] = (sx + offset_x, sy + offset_y)
             new_shape["end_p"] = (ex + offset_x, ey + offset_y)
         transformed_shapes.append(new_shape)
@@ -500,4 +500,78 @@ with col_left:
             with c2: 
                 curr_proc = s.get("process_type", "Profile")
                 proc_idx = proc_options.index(curr_proc) if curr_proc in proc_options else 0
-                s["process_type"] = st.selectbox("Kiểu cắt", proc_optionsBạn chưa gửi kèm các yêu cầu hoặc đoạn code trước đó trong đoạn chat này.
+                s["process_type"] = st.selectbox("Kiểu cắt", proc_options, key=f"proc_{idx}", index=proc_idx)
+            with c3:
+                curr_off = s.get("tool_offset", "Outside")
+                off_idx = off_options.index(curr_off) if curr_off in off_options else 0
+                s["tool_offset"] = st.selectbox("Offset dao", off_options, key=f"off_{idx}", index=off_idx)
+
+with col_right:
+    st.subheader("3. 👁️ Mô Phỏng Bàn Cắt & Cảnh Báo An Toàn")
+    
+    transformed_shapes = apply_work_zero_offset(st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos)
+    
+    safety_warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
+    if safety_warnings:
+        for w in safety_warnings: 
+            st.error(w)
+    else:
+        st.info("✅ Kiểm tra an toàn: Không phát hiện va chạm hoặc vượt khổ bàn cắt.")
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    
+    if work_zero_pos == "Bottom Left":
+        ax.set_xlim(0, bed_width); ax.set_ylim(0, bed_height)
+    elif work_zero_pos == "Center":
+        ax.set_xlim(-bed_width/2, bed_width/2); ax.set_ylim(-bed_height/2, bed_height/2)
+    else:
+        ax.set_xlim(-bed_width, bed_width); ax.set_ylim(-bed_height, bed_height)
+
+    ax.set_aspect('equal')
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.axhline(0, color='red', linewidth=1); ax.axvline(0, color='red', linewidth=1)
+    ax.plot(0, 0, 'rX', markersize=10, label=f"Work Zero {wcs_option}")
+
+    for s in transformed_shapes:
+        if "points" in s:
+            pts = np.array(s["points"])
+            ax.plot(pts[:, 0], pts[:, 1], 'b-', linewidth=1.2)
+        elif s["type"] == "CIRCLE":
+            cx, cy = s["center"]
+            circle_patch = plt.Circle((cx, cy), s["radius"], color='g', fill=False, linewidth=1.2)
+            ax.add_patch(circle_patch)
+        elif s["type"] == "ARC":
+            sp, ep = s["start_p"], s["end_p"]
+            ax.plot([sp[0], ep[0]], [sp[1], ep[1]], 'm--', linewidth=1.2)
+
+    ax.legend(loc="upper right")
+    st.pyplot(fig)
+
+# BOTTOM SECTION: G-CODE GENERATION & DOWNLOAD
+st.divider()
+st.subheader("4. 🚀 Xuất Chương Trình G-Code ISO")
+
+if st.session_state["loaded_shapes"]:
+    c_btn1, c_btn2 = st.columns(2)
+    
+    with c_btn1:
+        full_gcode = build_full_gcode_program(
+            transformed_shapes, wcs_option, spindle_speed, tool_diameter, 
+            feed_rate, plunge_rate, target_depth, step_down
+        )
+        st.download_button(
+            "💾 Tải File G-Code TỔNG (.nc)", 
+            data=full_gcode, file_name="FULL_PROGRAM.nc", mime="text/plain"
+        )
+
+    with c_btn2:
+        st.write("📦 **Tải file G-Code lẻ từng chi tiết:**")
+        for s in transformed_shapes:
+            single_gcode = build_full_gcode_program(
+                [s], wcs_option, spindle_speed, tool_diameter, 
+                feed_rate, plunge_rate, target_depth, step_down
+            )
+            st.download_button(
+                f"💾 File: {s['name']}.nc", 
+                data=single_gcode, file_name=f"{s['name']}.nc", mime="text/plain"
+            )
