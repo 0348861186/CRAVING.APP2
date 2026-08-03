@@ -6,6 +6,7 @@ from ezdxf import path
 import math
 import io
 import json
+import time
 from PIL import Image
 import matplotlib.pyplot as plt
 from pydantic import BaseModel, Field, ValidationError
@@ -138,57 +139,83 @@ class ShapeEngine:
         return compiled_shapes
 
 # ==============================================================================
-# 3. INPUT PARSERS (GEMINI + VALIDATION & EZDXF)
+# 3. INPUT PARSERS (GEMINI + AUTO RETRY 503 & EZDXF)
 # ==============================================================================
 def parse_image_with_gemini_ai(image_bytes, api_key, filename):
-    """Trích xuất Parametric Shape từ ảnh bằng Gemini AI + Validation Pydantic"""
-    try:
-        client = genai.Client(api_key=api_key)
-        img = Image.open(io.BytesIO(image_bytes))
+    """
+    Trích xuất Parametric Shape từ ảnh bằng Gemini AI
+    Bổ sung: Auto-Retry khi gặp 503 & Fallback Model dự phòng + Pydantic Validation
+    """
+    if not api_key:
+        st.error("Vui lòng nhập Gemini API Key!")
+        return []
 
-        prompt = """
-        Bạn là kỹ sư CAD/CAM chuyên nghiệp. Hãy phân tích bản vẽ/ảnh phác thảo và trích xuất các thông số hình học:
-        Trả về JSON đúng cấu trúc schema sau:
+    client = genai.Client(api_key=api_key)
+    img = Image.open(io.BytesIO(image_bytes))
+
+    prompt = """
+    Bạn là kỹ sư CAD/CAM chuyên nghiệp. Hãy phân tích bản vẽ/ảnh phác thảo và trích xuất các thông số hình học:
+    Trả về JSON đúng cấu trúc schema sau:
+    {
+      "shapes": [
         {
-          "shapes": [
-            {
-              "name": "ten_hinh",
-              "shape_type": "RECTANGLE" | "CIRCLE" | "REGULAR_POLYGON" | "ARC" | "POLYGON",
-              "width": 100.0,
-              "height": 50.0,
-              "radius": 25.0,
-              "sides": 5,
-              "center": [0.0, 0.0],
-              "origin": [0.0, 0.0],
-              "start_angle": 0.0,
-              "end_angle": 90.0,
-              "points": [[0,0], [10,0], [10,10]]
-            }
-          ]
+          "name": "ten_hinh",
+          "shape_type": "RECTANGLE" | "CIRCLE" | "REGULAR_POLYGON" | "ARC" | "POLYGON",
+          "width": 100.0,
+          "height": 50.0,
+          "radius": 25.0,
+          "sides": 5,
+          "center": [0.0, 0.0],
+          "origin": [0.0, 0.0],
+          "start_angle": 0.0,
+          "end_angle": 90.0,
+          "points": [[0,0], [10,0], [10,10]]
         }
-        """
+      ]
+    }
+    """
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[img, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=GeminiResponseModel
-            )
-        )
+    candidate_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    max_retries_per_model = 3
 
-        # VALIDATION VỚI PYDANTIC
-        raw_json = json.loads(response.text.strip())
-        validated_data = GeminiResponseModel(**raw_json)
-        
-        return ShapeEngine.compile_parametric_to_geometry(validated_data.shapes, filename)
+    for model_name in candidate_models:
+        for attempt in range(max_retries_per_model):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[img, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=GeminiResponseModel
+                    )
+                )
 
-    except ValidationError as ve:
-        st.error(f"❌ Lỗi Validation JSON Schema Gemini AI ({filename}):\n{ve}")
-        return []
-    except Exception as e:
-        st.error(f"❌ Lỗi xử lý Gemini AI ({filename}): {e}")
-        return []
+                # Validation dữ liệu trả về với Pydantic (Xử lý được cả pydantic v1/v2)
+                if hasattr(GeminiResponseModel, 'model_validate_json'):
+                    validated_data = GeminiResponseModel.model_validate_json(response.text.strip())
+                else:
+                    raw_json = json.loads(response.text.strip())
+                    validated_data = GeminiResponseModel(**raw_json)
+
+                return ShapeEngine.compile_parametric_to_geometry(validated_data.shapes, filename)
+
+            except ValidationError as ve:
+                st.error(f"❌ Lỗi Validation JSON Schema ({filename}):\n{ve}")
+                return []
+            except Exception as e:
+                err_msg = str(e)
+                if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg:
+                    wait_time = (attempt + 1) * 2
+                    st.warning(f"⚠️ Model {model_name} đang quá tải (503). Thử lại lần {attempt + 1}/{max_retries_per_model} sau {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    st.error(f"❌ Lỗi xử lý ảnh ({filename}): {e}")
+                    return []
+
+        st.warning(f"🔄 Chuyển sang model dự phòng tiếp theo...")
+
+    st.error(f"❌ Tất cả các model Gemini AI đều đang quá tải (503). Vui lòng bấm thử lại sau giây lát!")
+    return []
 
 def parse_dxf_with_ezdxf(file_bytes, filename):
     """Trích xuất dữ liệu hình học từ File DXF bằng ezdxf"""
@@ -524,7 +551,8 @@ else:
                 for img in uploaded_imgs:
                     shapes.extend(parse_image_with_gemini_ai(img.getvalue(), api_key, img.name))
             st.session_state["loaded_shapes"] = shapes
-            st.success(f"Đã tạo thành công {len(shapes)} hình học chuẩn xác từ ảnh!")
+            if shapes:
+                st.success(f"Đã tạo thành công {len(shapes)} hình học chuẩn xác từ ảnh!")
 
 # SECTION 2: SHAPE ENGINE & TOOLPATH
 st.divider()
