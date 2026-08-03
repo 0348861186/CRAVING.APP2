@@ -15,141 +15,52 @@ from google.genai import types
 from shapely.geometry import Polygon, LineString, Point, MultiPolygon
 
 # ==============================================================================
-# 1. BÀN CẮT VÀ CHUYỂN ĐỔI GỐC TỌA ĐỘ (WORK ZERO ALIGNMENT)
+# 1. SHAPE ENGINE: DỰNG TỌA ĐỘ TỪ PARAMETRIC SHAPE (TOÁN HỌC CHÍNH XÁC 100%)
 # ==============================================================================
-def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
-    offset_x, offset_y = 0.0, 0.0
-    if work_zero == "Top Left":
-        offset_y = -bed_h
-    elif work_zero == "Top Right":
-        offset_x, offset_y = -bed_w, -bed_h
-    elif work_zero == "Bottom Right":
-        offset_x = -bed_w
-    elif work_zero == "Center":
-        offset_x, offset_y = -bed_w / 2.0, -bed_h / 2.0
+class ShapeEngine:
+    @staticmethod
+    def create_regular_polygon(center, radius, sides, start_angle=90.0):
+        """Tạo tọa độ chính xác cho Đa giác đều (Ngũ giác, Lục giác, Tam giác...)"""
+        cx, cy = center
+        pts = []
+        angle_step = 360.0 / sides
+        for i in range(sides):
+            deg = start_angle + i * angle_step
+            rad = math.radians(deg)
+            x = cx + radius * math.cos(rad)
+            y = cy + radius * math.sin(rad)
+            pts.append((round(x, 4), round(y, 4)))
+        pts.append(pts[0]) # Khép kín
+        return pts
 
-    transformed_shapes = []
-    for shape in shapes:
-        new_shape = shape.copy()
-        if "points" in shape:
-            new_shape["points"] = [(p[0] + offset_x, p[1] + offset_y) for p in shape["points"]]
-        if "center" in shape:
-            cx, cy = shape["center"]
-            new_shape["center"] = (cx + offset_x, cy + offset_y)
-        if "start_p" in shape and "end_p" in shape:
-            sx, sy = shape["start_p"]
-            ex, ey = shape["end_p"]
-            new_shape["start_p"] = (sx + offset_x, sy + offset_y)
-            new_shape["end_p"] = (ex + offset_x, ey + offset_y)
-        transformed_shapes.append(new_shape)
-        
-    return transformed_shapes
-
-# ==============================================================================
-# 2. HÀM GEMINI VISION AI - CHUẨN HÓA KÍCH THƯỚC & CHÍNH XÁC HÌNH HỌC 100%
-# ==============================================================================
-def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
-    """
-    AI chỉ đóng vai trò trích xuất tham số hình học (Kích thước W, H, Bán kính R, Tâm X,Y).
-    Python sẽ tự tạo tọa độ 2D chuẩn xác để tránh méo do góc chụp ảnh.
-    """
-    try:
-        client = genai.Client(api_key=api_key)
-        img = Image.open(io.BytesIO(image_bytes))
-
-        prompt = """
-        Bạn là một kỹ sư trích xuất tham số CAD/CAM từ ảnh phác thảo tay.
-        Hãy đọc kỹ các CON SỐ KÍCH THƯỚC (mm) ghi trên ảnh và phân loại từng hình dạng.
-
-        QUY TẮC PHÂN LOẠI & TRÍCH XUẤT THAM SỐ:
-        1. Nếu là HÌNH CHỮ NHẬT / HÌNH VUÔNG:
-           - Trả về 'shape_type': 'RECTANGLE'
-           - Trích xuất 'width': W (chiều rộng mm) và 'height': H (chiều cao mm).
-           - Nếu có vị trí góc dưới bên trái, trả về 'origin': [X, Y] (mặc định [0, 0]).
-
-        2. Nếu là HÌNH TRÒN / LỖ KHOAN:
-           - Trả về 'shape_type': 'CIRCLE'
-           - Trích xuất 'center': [X, Y] (tọa độ tâm mm) và 'radius': R (bán kính mm).
-
-        3. Nếu là HÌNH ĐA GIÁC / HÌNH KHÁC (Tam giác, L-shape, Đa giác):
-           - Trả về 'shape_type': 'POLYGON'
-           - Trích xuất danh sách tọa độ 2D chuẩn 'points': [[x1, y1], [x2, y2], ...] nối tiếp theo chu vi khép kín.
-
-        YÊU CẦU ĐẦU RA:
-        Chỉ trả về DUY NHẤT mảng JSON hợp lệ (Không chứa text giải thích, không dùng ```json):
-        [
-            {
-                "name": "Phoi_Chinh",
-                "shape_type": "RECTANGLE",
-                "width": 200.0,
-                "height": 100.0,
-                "origin": [0.0, 0.0]
-            },
-            {
-                "name": "Lo_Khoan_1",
-                "shape_type": "CIRCLE",
-                "center": [50.0, 50.0],
-                "radius": 10.0
-            }
+    @staticmethod
+    def create_rectangle(width, height, origin=(0.0, 0.0)):
+        """Tạo tọa độ chuẩn cho Hình chữ nhật / Hình vuông"""
+        ox, oy = origin
+        return [
+            (ox, oy),
+            (ox + width, oy),
+            (ox + width, oy + height),
+            (ox, oy + height),
+            (ox, oy)
         ]
+
+    @classmethod
+    def compile_parametric_to_geometry(cls, parametric_data, filename=""):
         """
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[img, prompt]
-        )
-
-        raw_text = response.text.strip()
-
-        # Dọn dẹp JSON
-        json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-        if json_match:
-            raw_text = json_match.group(0)
-
-        data = json.loads(raw_text)
-        shapes = []
-
-        for idx, item in enumerate(data):
+        Nhận vào JSON Parametric Shape và quy đổi thành đối tượng Geometry 2D
+        """
+        compiled_shapes = []
+        for idx, item in enumerate(parametric_data):
             s_name = f"{filename}_{item.get('name', f'shape_{idx+1}')}"
             stype = str(item.get("shape_type", "POLYGON")).upper()
-            
+
             if stype == "RECTANGLE":
                 w = float(item.get("width", 100.0))
                 h = float(item.get("height", 100.0))
                 ox, oy = item.get("origin", [0.0, 0.0])
-                
-                # PYTHON TỰ NỐI 4 GÓC CHUẨN XÁC HÌNH CHỮ NHẬT
-                rect_pts = [
-                    (ox, oy),
-                    (ox + w, oy),
-                    (ox + w, oy + h),
-                    (ox, oy + h),
-                    (ox, oy)  # Khép kín
-                ]
-                shapes.append({
-                    "name": s_name,
-                    "type": "POLYLINE",
-                    "points": rect_pts,
-                    "process_type": "Profile",
-                    "tool_offset": "Outside"
-                })
-
-            elif stype == "CIRCLE":
-                shapes.append({
-                    "name": s_name,
-                    "type": "CIRCLE",
-                    "center": (float(item["center"][0]), float(item["center"][1])),
-                    "radius": float(item["radius"]),
-                    "process_type": "Drill",
-                    "tool_offset": "Center"
-                })
-
-            else:  # POLYGON
-                pts = [(float(p[0]), float(p[1])) for p in item.get("points", [])]
-                if pts and pts[0] != pts[-1]:
-                    pts.append(pts[0])
-                    
-                shapes.append({
+                pts = cls.create_rectangle(w, h, (ox, oy))
+                compiled_shapes.append({
                     "name": s_name,
                     "type": "POLYLINE",
                     "points": pts,
@@ -157,16 +68,105 @@ def parse_sketch_image_with_gemini(image_bytes, api_key, filename):
                     "tool_offset": "Outside"
                 })
 
-        return shapes
+            elif stype == "CIRCLE":
+                cx, cy = item.get("center", [0.0, 0.0])
+                compiled_shapes.append({
+                    "name": s_name,
+                    "type": "CIRCLE",
+                    "center": (float(cx), float(cy)),
+                    "radius": float(item.get("radius", 10.0)),
+                    "process_type": "Drill",
+                    "tool_offset": "Center"
+                })
+
+            elif stype == "REGULAR_POLYGON":
+                sides = int(item.get("sides", 5)) # Mặc định ngũ giác
+                cx, cy = item.get("center", [0.0, 0.0])
+                
+                if "radius" in item:
+                    radius = float(item["radius"])
+                elif "side_length" in item:
+                    side_len = float(item["side_length"])
+                    radius = side_len / (2 * math.sin(math.pi / sides))
+                else:
+                    radius = 50.0
+
+                pts = cls.create_regular_polygon((cx, cy), radius, sides)
+                compiled_shapes.append({
+                    "name": s_name,
+                    "type": "POLYLINE",
+                    "points": pts,
+                    "process_type": "Profile",
+                    "tool_offset": "Outside"
+                })
+
+            else:  # POLYGON tự do
+                pts = [(float(p[0]), float(p[1])) for p in item.get("points", [])]
+                if pts and pts[0] != pts[-1]:
+                    pts.append(pts[0])
+                compiled_shapes.append({
+                    "name": s_name,
+                    "type": "POLYLINE",
+                    "points": pts,
+                    "process_type": "Profile",
+                    "tool_offset": "Outside"
+                })
+
+        return compiled_shapes
+
+# ==============================================================================
+# 2. INPUT PARSERS: GEMINI AI (IMAGE) & EZDXF (DXF)
+# ==============================================================================
+def parse_image_with_gemini_ai(image_bytes, api_key, filename):
+    """
+    Trích xuất PARAMETRIC SHAPE từ ảnh bằng Gemini AI
+    """
+    try:
+        client = genai.Client(api_key=api_key)
+        img = Image.open(io.BytesIO(image_bytes))
+
+        prompt = """
+        Bạn là kỹ sư CAD/CAM. Hãy trích xuất THAM SỐ HÌNH HỌC (Parametric Shapes) từ ảnh phác thảo:
+
+        QUY TẮC TRÍCH XUẤT:
+        1. HÌNH CHỮ NHẬT / VUÔNG:
+           'shape_type': 'RECTANGLE', 'width': W (mm), 'height': H (mm), 'origin': [x, y]
+        2. HÌNH TRÒN / LỖ KHOAN:
+           'shape_type': 'CIRCLE', 'center': [x, y], 'radius': R (mm)
+        3. HÌNH ĐA GIÁC ĐỀU (Ngũ giác, Lục giác, Bát giác, Tam giác đều...):
+           'shape_type': 'REGULAR_POLYGON', 'sides': N (số cạnh, ví dụ 5 cho ngũ giác), 'center': [x, y], 'radius': R (bán kính ngoại tiếp mm) HOẶC 'side_length': L (độ dài cạnh mm)
+        4. HÌNH TỰ DO:
+           'shape_type': 'POLYGON', 'points': [[x1,y1], [x2,y2]...]
+
+        Trả về duy nhất mảng JSON hợp lệ:
+        [
+            {
+                "name": "Ngu_Giac_Deu",
+                "shape_type": "REGULAR_POLYGON",
+                "sides": 5,
+                "center": [0.0, 0.0],
+                "radius": 50.0
+            }
+        ]
+        """
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[img, prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+
+        parametric_data = json.loads(response.text.strip())
+        return ShapeEngine.compile_parametric_to_geometry(parametric_data, filename)
 
     except Exception as e:
-        st.error(f"Lỗi khi Gemini AI phân tích ảnh ({filename}): {e}")
+        st.error(f"Lỗi phân tích Gemini AI ({filename}): {e}")
         return []
 
-# ==============================================================================
-# 3. XỬ LÝ HÌNH HỌC DXF NGUYÊN BẢN
-# ==============================================================================
-def parse_dxf_geometry_v2(file_bytes, filename):
+def parse_dxf_with_ezdxf(file_bytes, filename):
+    """
+    Trích xuất dữ liệu hình học từ File DXF bằng ezdxf
+    """
     try:
         content = file_bytes.getvalue().decode('utf-8', errors='ignore')
         doc = ezdxf.read(io.StringIO(content))
@@ -174,7 +174,7 @@ def parse_dxf_geometry_v2(file_bytes, filename):
         try:
             doc = ezdxf.read(io.BytesIO(file_bytes.getvalue()))
         except Exception as ex:
-            st.error(f"Lỗi đọc file DXF ({filename}): {ex}")
+            st.error(f"Lỗi đọc DXF ({filename}): {ex}")
             return []
 
     msp = doc.modelspace()
@@ -195,16 +195,13 @@ def parse_dxf_geometry_v2(file_bytes, filename):
         elif dxftype == 'ARC':
             center = (float(entity.dxf.center.x), float(entity.dxf.center.y))
             radius = float(entity.dxf.radius)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
-            
-            sa_rad, ea_rad = math.radians(start_angle), math.radians(end_angle)
+            sa_rad = math.radians(float(entity.dxf.start_angle))
+            ea_rad = math.radians(float(entity.dxf.end_angle))
             start_p = (center[0] + radius * math.cos(sa_rad), center[1] + radius * math.sin(sa_rad))
             end_p = (center[0] + radius * math.cos(ea_rad), center[1] + radius * math.sin(ea_rad))
 
             shapes.append({
                 "name": s_name, "type": "ARC", "center": center, "radius": radius,
-                "start_angle": start_angle, "end_angle": end_angle,
                 "start_p": start_p, "end_p": end_p,
                 "process_type": "Profile", "tool_offset": "Center", "cw": True
             })
@@ -225,41 +222,54 @@ def parse_dxf_geometry_v2(file_bytes, filename):
     return shapes
 
 # ==============================================================================
-# 4. TOOL OFFSET & POCKET PASSES
+# 3. WORK ZERO, OFFSET, POCKET, COLLISION & OPTIMIZATION
 # ==============================================================================
+def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
+    offset_x, offset_y = 0.0, 0.0
+    if work_zero == "Top Left": offset_y = -bed_h
+    elif work_zero == "Top Right": offset_x, offset_y = -bed_w, -bed_h
+    elif work_zero == "Bottom Right": offset_x = -bed_w
+    elif work_zero == "Center": offset_x, offset_y = -bed_w / 2.0, -bed_h / 2.0
+
+    transformed = []
+    for shape in shapes:
+        ns = shape.copy()
+        if "points" in shape:
+            ns["points"] = [(p[0] + offset_x, p[1] + offset_y) for p in shape["points"]]
+        if "center" in shape:
+            cx, cy = shape["center"]
+            ns["center"] = (cx + offset_x, cy + offset_y)
+        if "start_p" in shape and "end_p" in shape:
+            sx, sy = shape["start_p"]
+            ex, ey = shape["end_p"]
+            ns["start_p"] = (sx + offset_x, sy + offset_y)
+            ns["end_p"] = (ex + offset_x, ey + offset_y)
+        transformed.append(ns)
+    return transformed
+
 def apply_tool_offset(pts, tool_dia, offset_type):
-    if len(pts) < 3 or offset_type == "Center":
-        return pts
-    
+    if len(pts) < 3 or offset_type == "Center": return pts
     closed_pts = list(pts)
-    if closed_pts[0] != closed_pts[-1]:
-        closed_pts.append(closed_pts[0])
+    if closed_pts[0] != closed_pts[-1]: closed_pts.append(closed_pts[0])
 
     poly = Polygon(closed_pts)
-    if not poly.is_valid:
-        poly = poly.buffer(0)
+    if not poly.is_valid: poly = poly.buffer(0)
 
     radius = tool_dia / 2.0
     buffer_dist = radius if offset_type == "Outside" else -radius
-
     offset_poly = poly.buffer(buffer_dist)
-    if offset_poly.is_empty:
-        return pts
-    
-    if isinstance(offset_poly, Polygon):
-        return list(offset_poly.exterior.coords)
-    elif isinstance(offset_poly, MultiPolygon):
-        return list(offset_poly.geoms[0].exterior.coords)
+
+    if offset_poly.is_empty: return pts
+    if isinstance(offset_poly, Polygon): return list(offset_poly.exterior.coords)
+    elif isinstance(offset_poly, MultiPolygon): return list(offset_poly.geoms[0].exterior.coords)
     return pts
 
 def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
     closed_pts = list(pts)
-    if closed_pts[0] != closed_pts[-1]:
-        closed_pts.append(closed_pts[0])
+    if closed_pts[0] != closed_pts[-1]: closed_pts.append(closed_pts[0])
 
     poly = Polygon(closed_pts)
-    if not poly.is_valid: 
-        poly = poly.buffer(0)
+    if not poly.is_valid: poly = poly.buffer(0)
 
     step = tool_dia * stepover_ratio
     paths = []
@@ -270,61 +280,18 @@ def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
             paths.append(list(current_poly.exterior.coords))
             current_poly = current_poly.buffer(-step)
         elif isinstance(current_poly, MultiPolygon):
-            for p in current_poly.geoms:
-                paths.append(list(p.exterior.coords))
+            for p in current_poly.geoms: paths.append(list(p.exterior.coords))
             current_poly = current_poly.buffer(-step)
-        else:
-            break
+        else: break
     return paths
 
-# ==============================================================================
-# 5. TỐI ƯU THỨ TỰ CHẠY DAO (TSP NEAREST NEIGHBOR)
-# ==============================================================================
-def optimize_toolpath_order(shapes):
-    if not shapes: 
-        return []
-    
-    def get_start_point(s):
-        if "points" in s and s["points"]: 
-            return s["points"][0]
-        elif "center" in s: 
-            return s["center"]
-        elif "start_p" in s: 
-            return s["start_p"]
-        return (0.0, 0.0)
-
-    unvisited = shapes.copy()
-    optimized = []
-    current_pos = (0.0, 0.0)
-
-    while unvisited:
-        nearest_idx = 0
-        min_dist = float('inf')
-
-        for idx, s in enumerate(unvisited):
-            sp = get_start_point(s)
-            dist = math.hypot(sp[0] - current_pos[0], sp[1] - current_pos[1])
-            if dist < min_dist:
-                min_dist = dist
-                nearest_idx = idx
-
-        selected_shape = unvisited.pop(nearest_idx)
-        optimized.append(selected_shape)
-        current_pos = get_start_point(selected_shape)
-
-    return optimized
-
-# ==============================================================================
-# 6. KIỂM TRA VA CHẠM VÀ VƯỢT KHỔ BÀN CẮT
-# ==============================================================================
 def check_safety_and_collisions(shapes, bed_w, bed_h):
     warnings = []
     polygons = []
 
     for s in shapes:
         pts = []
-        if "points" in s:
-            pts = s["points"]
+        if "points" in s: pts = s["points"]
         elif s["type"] in ["CIRCLE", "DRILL"]:
             cx, cy = s["center"]
             r = s.get("radius", 5)
@@ -333,20 +300,45 @@ def check_safety_and_collisions(shapes, bed_w, bed_h):
         if pts:
             xs, ys = [p[0] for p in pts], [p[1] for p in pts]
             if min(xs) < 0 or max(xs) > bed_w or min(ys) < 0 or max(ys) > bed_h:
-                warnings.append(f"⚠️ Chi tiết '{s['name']}' vượt khổ bàn ({bed_w}x{bed_h}mm).")
+                warnings.append(f"⚠️ Chi tiết '{s['name']}' vượt khổ bàn phôi ({bed_w}x{bed_h}mm).")
 
             if len(pts) >= 3:
                 poly = Polygon(pts)
                 if poly.is_valid:
-                    for existing_poly in polygons:
-                        if poly.intersects(existing_poly) and not poly.touches(existing_poly):
-                            warnings.append(f"🚨 Phát hiện va chạm tại '{s['name']}'.")
+                    for existing in polygons:
+                        if poly.intersects(existing) and not poly.touches(existing):
+                            warnings.append(f"🚨 Phát hiện va chạm giữa các đường cắt tại '{s['name']}'.")
                     polygons.append(poly)
-
     return warnings
 
+def optimize_toolpath_order(shapes):
+    if not shapes: return []
+    def get_start(s):
+        if "points" in s and s["points"]: return s["points"][0]
+        elif "center" in s: return s["center"]
+        elif "start_p" in s: return s["start_p"]
+        return (0.0, 0.0)
+
+    unvisited = shapes.copy()
+    optimized = []
+    curr = (0.0, 0.0)
+
+    while unvisited:
+        nearest_idx = 0
+        min_dist = float('inf')
+        for idx, s in enumerate(unvisited):
+            sp = get_start(s)
+            dist = math.hypot(sp[0] - curr[0], sp[1] - curr[1])
+            if dist < min_dist:
+                min_dist = dist
+                nearest_idx = idx
+        sel = unvisited.pop(nearest_idx)
+        optimized.append(sel)
+        curr = get_start(sel)
+    return optimized
+
 # ==============================================================================
-# 7. TRÌNH BIÊN DỊCH G-CODE ISO
+# 4. G-CODE GENERATOR
 # ==============================================================================
 def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
     lines = []
@@ -363,18 +355,7 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
         lines.append(f"G0 X{cx:.3f} Y{cy:.3f}")
         for z in z_levels:
             lines.append(f"G81 X{cx:.3f} Y{cy:.3f} Z{z:.3f} R2.000 F{plunge}")
-        lines.append("G80 (Cancel Drill Cycle)")
-
-    elif s["type"] == "ARC":
-        cx, cy = s["center"]
-        sp, ep = s["start_p"], s["end_p"]
-        i_val, j_val = cx - sp[0], cy - sp[1]
-        g_cmd = "G2" if s.get("cw", True) else "G3"
-        
-        lines.append(f"G0 X{sp[0]:.3f} Y{sp[1]:.3f}")
-        for z in z_levels:
-            lines.append(f"G1 Z{z:.3f} F{plunge}")
-            lines.append(f"{g_cmd} X{ep[0]:.3f} Y{ep[1]:.3f} I{i_val:.3f} J{j_val:.3f} F{feed}")
+        lines.append("G80")
 
     elif proc_type == "Pocket" and "points" in s:
         pocket_paths = generate_pocket_toolpaths(s["points"], tool_dia)
@@ -394,212 +375,128 @@ def compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down):
             for p in actual_pts[1:]:
                 lines.append(f"G1 X{p[0]:.3f} Y{p[1]:.3f} F{feed}")
 
-    lines.append("G0 Z15.000 (Safe Height Retract)\n")
+    lines.append("G0 Z15.000\n")
     return "\n".join(lines)
 
-def build_full_gcode_program(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, step_down):
+def build_full_gcode(shapes, wcs, spindle, tool_dia, feed, plunge, target_z, step_down):
     header = [
         "(--- STREAMLIT CAM STUDIO PRO - ISO G-CODE ---)",
         "G21 G90 G17 G94",
-        f"{wcs} (Work Coordinate System)",
-        f"M3 S{spindle} (Spindle ON CW)",
-        "G0 Z15.000",
-        "G4 P2.0\n"
+        f"{wcs}",
+        f"M3 S{spindle}",
+        "G0 Z15.000\n"
     ]
-    
     body = [compile_shape_to_gcode(s, tool_dia, feed, plunge, target_z, step_down) for s in shapes]
-
-    footer = [
-        "(--- PROGRAM END ---)",
-        "G0 Z15.000",
-        "M5 M9",
-        f"{wcs} G0 X0.000 Y0.000",
-        "M30"
-    ]
+    footer = ["M5 M9", f"{wcs} G0 X0.000 Y0.000", "M30"]
     return "\n".join(header + body + footer)
 
 # ==============================================================================
-# 8. GIAO DIỆN STREAMLIT
+# 5. GIAO DIỆN STREAMLIT
 # ==============================================================================
-st.set_page_config(page_title="Streamlit CAM Studio Pro v3", layout="wide")
-st.title("⚙️ Streamlit CAM Studio Pro - Full Suite CNC Toolpath")
+st.set_page_config(page_title="CAM Studio Pro - Parametric Engine", layout="wide")
+st.title("⚙️ Parametric Shape CAM Studio - AI & DXF Pipeline")
 
-# SIDEBAR CONFIGURATION
-st.sidebar.header("🔧 Cấu Hình Máy & Công Nghệ Gia Công")
-wcs_option = st.sidebar.selectbox("Gốc tọa độ WCS", ["G54", "G55", "G56", "G57", "G58", "G59"])
-work_zero_pos = st.sidebar.selectbox("Vị trí Work Zero trên bàn phôi", ["Bottom Left", "Top Left", "Top Right", "Bottom Right", "Center"])
+# SIDEBAR
+st.sidebar.header("🔧 Cấu Hình Gia Công")
+wcs_option = st.sidebar.selectbox("Gốc WCS", ["G54", "G55", "G56", "G57", "G58", "G59"])
+work_zero_pos = st.sidebar.selectbox("Work Zero Phôi", ["Bottom Left", "Top Left", "Top Right", "Bottom Right", "Center"])
 
-bed_width = st.sidebar.number_input("Chiều rộng bàn cắt X (mm)", value=600.0, step=50.0)
-bed_height = st.sidebar.number_input("Chiều dài bàn cắt Y (mm)", value=400.0, step=50.0)
+bed_width = st.sidebar.number_input("Chiều rộng bàn phôi X (mm)", value=600.0)
+bed_height = st.sidebar.number_input("Chiều dài bàn phôi Y (mm)", value=400.0)
 
-tool_diameter = st.sidebar.number_input("Đường kính dao Phay (mm)", value=3.175, step=0.1)
-target_depth = st.sidebar.number_input("Độ sâu cắt Z (mm)", value=-6.0, step=0.5)
-step_down = st.sidebar.number_input("Chiều sâu mỗi pass Z (mm)", value=2.0, step=0.5)
+tool_diameter = st.sidebar.number_input("Đường kính dao (mm)", value=3.175)
+target_depth = st.sidebar.number_input("Độ sâu cắt Z (mm)", value=-6.0)
+step_down = st.sidebar.number_input("Chiều sâu mỗi Pass Z (mm)", value=2.0)
 
-feed_rate = st.sidebar.number_input("Tốc độ cắt Feedrate (mm/p)", value=1800, step=100)
-plunge_rate = st.sidebar.number_input("Tốc độ cắm dao Plunge (mm/p)", value=400, step=50)
-spindle_speed = st.sidebar.number_input("Tốc độ Trục chính Spindle (RPM)", value=18000, step=1000)
+feed_rate = st.sidebar.number_input("Feedrate (mm/p)", value=1800)
+plunge_rate = st.sidebar.number_input("Plunge Rate (mm/p)", value=400)
+spindle_speed = st.sidebar.number_input("Spindle (RPM)", value=18000)
 
-st.sidebar.divider()
-st.sidebar.header("🤖 Cấu hình Gemini Vision AI")
-api_key = st.sidebar.text_input("Nhập Gemini API Key", type="password", help="Bắt buộc khi chọn đọc File Ảnh Phác Thảo Tay")
+api_key = st.sidebar.text_input("Gemini API Key (Dành cho ảnh)", type="password")
 
 if "loaded_shapes" not in st.session_state:
     st.session_state["loaded_shapes"] = []
 
-# WORKSPACE: FILE UPLOADER VỚI DROPDOWN LỰA CHỌN
-st.subheader("1. 📥 Nạp File Gia Công")
+# SECTION 1: INPUT
+st.subheader("1. 📥 INPUT: Nạp File Bản Vẽ hoặc Ảnh Phác Thảo")
+input_type = st.radio("Chọn định dạng đầu vào:", ["DXF (ezdxf)", "IMAGE/SKETCH (Gemini AI)"], horizontal=True)
 
-input_mode = st.selectbox(
-    "Chọn định dạng File đầu vào:",
-    ["File Bản Vẽ CAD (.DXF)", "Ảnh Phác Thảo Vẽ Tay (.PNG, .JPG, .JPEG)"]
-)
-
-if input_mode == "File Bản Vẽ CAD (.DXF)":
-    uploaded_files = st.file_uploader(
-        "Thả hoặc chọn nhiều file DXF tại đây", 
-        type=["dxf"], 
-        accept_multiple_files=True
-    )
-
-    if uploaded_files and st.button("🔄 Đọc dữ liệu File DXF"):
-        all_shapes = []
-        for f in uploaded_files:
-            parsed = parse_dxf_geometry_v2(f, f.name)
-            all_shapes.extend(parsed)
-        st.session_state["loaded_shapes"] = all_shapes
-        st.success(f"Đã trích xuất thành công {len(all_shapes)} đối tượng hình học từ DXF!")
+if input_type == "DXF (ezdxf)":
+    uploaded_dxfs = st.file_uploader("Thả file DXF tại đây", type=["dxf"], accept_multiple_files=True)
+    if uploaded_dxfs and st.button("🔄 Đọc dữ liệu DXF"):
+        shapes = []
+        for f in uploaded_dxfs:
+            shapes.extend(parse_dxf_with_ezdxf(f, f.name))
+        st.session_state["loaded_shapes"] = shapes
+        st.success(f"Đã đọc {len(shapes)} đối tượng từ DXF!")
 
 else:
-    uploaded_images = st.file_uploader(
-        "Thả hoặc chọn ảnh phác thảo vẽ tay có ghi chú kích thước tại đây", 
-        type=["png", "jpg", "jpeg"], 
-        accept_multiple_files=True
-    )
-
-    if uploaded_images and st.button("🤖 Phân Tích Ảnh Bằng Gemini AI"):
+    uploaded_imgs = st.file_uploader("Thả ảnh phác thảo/bản vẽ tay tại đây", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    if uploaded_imgs and st.button("🤖 Phân Tích Gemini AI & Parametric Engine"):
         if not api_key:
-            st.error("Vui lòng nhập Gemini API Key ở thanh Sidebar bên trái!")
+            st.error("Vui lòng nhập Gemini API Key ở Sidebar!")
         else:
-            all_shapes = []
-            with st.spinner("Gemini AI đang phân tích kích thước và tọa độ từ bức ảnh..."):
-                for img_file in uploaded_images:
-                    bytes_data = img_file.getvalue()
-                    parsed = parse_sketch_image_with_gemini(bytes_data, api_key, img_file.name)
-                    all_shapes.extend(parsed)
-            st.session_state["loaded_shapes"] = all_shapes
-            st.success(f"Gemini AI đã phân tích thành công {len(all_shapes)} đối tượng hình học từ ảnh!")
+            shapes = []
+            with st.spinner("Gemini AI đang trích xuất Parametric Shape & Shape Engine đang tạo tọa độ 2D..."):
+                for img in uploaded_imgs:
+                    shapes.extend(parse_image_with_gemini_ai(img.getvalue(), api_key, img.name))
+            st.session_state["loaded_shapes"] = shapes
+            st.success(f"Đã tạo thành công {len(shapes)} hình học chuẩn xác từ ảnh!")
 
+# SECTION 2: SHAPE ENGINE & HẬU KỲ
 st.divider()
 col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
-    st.subheader("2. 🔀 Sắp Xếp Thứ Tự Cắt & Cấu Hình Toolpath")
-    
+    st.subheader("2. 🛠️ SHAPE ENGINE: Cấu hình Toolpath, Offset & Pocket")
     if st.session_state["loaded_shapes"]:
-        if st.button("⚡ Tối ưu đường chạy dao ngắn nhất (Nearest Neighbor)"):
+        if st.button("⚡ Tối ưu đường chạy dao (Optimize - Nearest Neighbor)"):
             st.session_state["loaded_shapes"] = optimize_toolpath_order(st.session_state["loaded_shapes"])
             st.success("Đã tối ưu thứ tự gia công!")
 
-        all_names = [s["name"] for s in st.session_state["loaded_shapes"]]
-        selected_order = st.multiselect(
-            "Chọn/Sắp xếp thứ tự cắt theo ý muốn (Chọn lần lượt):",
-            options=all_names,
-            default=all_names
-        )
-
-        if selected_order:
-            reordered_shapes = []
-            for name in selected_order:
-                for s in st.session_state["loaded_shapes"]:
-                    if s["name"] == name:
-                        reordered_shapes.append(s)
-                        break
-            st.session_state["loaded_shapes"] = reordered_shapes
-
-        st.write("🛠️ **Cấu hình Kiểu gia công & Tool Offset:**")
-        proc_options = ["Profile", "Pocket", "Drill", "Engrave"]
+        proc_options = ["Profile", "Pocket", "Drill"]
         off_options = ["Outside", "Inside", "Center"]
 
         for idx, s in enumerate(st.session_state["loaded_shapes"]):
             c1, c2, c3 = st.columns([2, 1.5, 1.5])
-            with c1: 
-                st.caption(f"**{s['name']}**")
-            with c2: 
-                curr_proc = s.get("process_type", "Profile")
-                proc_idx = proc_options.index(curr_proc) if curr_proc in proc_options else 0
-                s["process_type"] = st.selectbox("Kiểu cắt", proc_options, key=f"proc_{idx}", index=proc_idx)
-            with c3:
-                curr_off = s.get("tool_offset", "Outside")
-                off_idx = off_options.index(curr_off) if curr_off in off_options else 0
-                s["tool_offset"] = st.selectbox("Offset dao", off_options, key=f"off_{idx}", index=off_idx)
+            with c1: st.caption(f"**{s['name']}**")
+            with c2: s["process_type"] = st.selectbox("Kiểu cắt", proc_options, key=f"proc_{idx}", index=0)
+            with c3: s["tool_offset"] = st.selectbox("Offset dao", off_options, key=f"off_{idx}", index=0)
 
 with col_right:
-    st.subheader("3. 👁️ Mô Phỏng Bàn Cắt & Cảnh Báo An Toàn")
-    
+    st.subheader("3. 👁️ Mô phỏng & Collision Warning")
     transformed_shapes = apply_work_zero_offset(st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos)
     
-    safety_warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
-    if safety_warnings:
-        for w in safety_warnings: 
-            st.error(w)
+    # Check Safety & Collision
+    warnings = check_safety_and_collisions(transformed_shapes, bed_width, bed_height)
+    if warnings:
+        for w in warnings: st.error(w)
     else:
-        st.info("✅ Kiểm tra an toàn: Không phát hiện va chạm hoặc vượt khổ bàn cắt.")
+        st.info("✅ Kiểm tra an toàn: Không có va chạm hoặc vượt khổ bàn phôi.")
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    
-    if work_zero_pos == "Bottom Left":
-        ax.set_xlim(0, bed_width); ax.set_ylim(0, bed_height)
-    elif work_zero_pos == "Center":
-        ax.set_xlim(-bed_width/2, bed_width/2); ax.set_ylim(-bed_height/2, bed_height/2)
-    else:
-        ax.set_xlim(-bed_width, bed_width); ax.set_ylim(-bed_height, bed_height)
-
     ax.set_aspect('equal')
     ax.grid(True, linestyle='--', alpha=0.5)
-    ax.axhline(0, color='red', linewidth=1); ax.axvline(0, color='red', linewidth=1)
-    ax.plot(0, 0, 'rX', markersize=10, label=f"Work Zero {wcs_option}")
+    ax.axhline(0, color='red', linewidth=1)
+    ax.axvline(0, color='red', linewidth=1)
 
     for s in transformed_shapes:
         if "points" in s:
             pts = np.array(s["points"])
-            ax.plot(pts[:, 0], pts[:, 1], 'b-', linewidth=1.2)
+            ax.plot(pts[:, 0], pts[:, 1], 'b-')
         elif s["type"] == "CIRCLE":
             cx, cy = s["center"]
-            circle_patch = plt.Circle((cx, cy), s["radius"], color='g', fill=False, linewidth=1.2)
-            ax.add_patch(circle_patch)
-        elif s["type"] == "ARC":
-            sp, ep = s["start_p"], s["end_p"]
-            ax.plot([sp[0], ep[0]], [sp[1], ep[1]], 'm--', linewidth=1.2)
+            circle = plt.Circle((cx, cy), s["radius"], color='g', fill=False)
+            ax.add_patch(circle)
 
-    ax.legend(loc="upper right")
     st.pyplot(fig)
 
-# BOTTOM SECTION: G-CODE GENERATION & DOWNLOAD
+# SECTION 3: G-CODE EXPORT
 st.divider()
-st.subheader("4. 🚀 Xuất Chương Trình G-Code ISO")
-
+st.subheader("4. 🚀 G-CODE Export")
 if st.session_state["loaded_shapes"]:
-    c_btn1, c_btn2 = st.columns(2)
-    
-    with c_btn1:
-        full_gcode = build_full_gcode_program(
-            transformed_shapes, wcs_option, spindle_speed, tool_diameter, 
-            feed_rate, plunge_rate, target_depth, step_down
-        )
-        st.download_button(
-            "💾 Tải File G-Code TỔNG (.nc)", 
-            data=full_gcode, file_name="FULL_PROGRAM.nc", mime="text/plain"
-        )
-
-    with c_btn2:
-        st.write("📦 **Tải file G-Code lẻ từng chi tiết:**")
-        for s in transformed_shapes:
-            single_gcode = build_full_gcode_program(
-                [s], wcs_option, spindle_speed, tool_diameter, 
-                feed_rate, plunge_rate, target_depth, step_down
-            )
-            st.download_button(
-                f"💾 File: {s['name']}.nc", 
-                data=single_gcode, file_name=f"{s['name']}.nc", mime="text/plain"
-            )
+    gcode_text = build_full_gcode(
+        transformed_shapes, wcs_option, spindle_speed, tool_diameter,
+        feed_rate, plunge_rate, target_depth, step_down
+    )
+    st.download_button("💾 Tải File G-Code (.nc)", data=gcode_text, file_name="OUTPUT_PROGRAM.nc", mime="text/plain")
