@@ -1,4 +1,3 @@
-CODE1
 import io
 import json
 import math
