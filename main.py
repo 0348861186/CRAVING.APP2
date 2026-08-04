@@ -1,3 +1,4 @@
+CODE1
 import io
 import json
 import math
@@ -12,6 +13,7 @@ from ezdxf import path
 from google import genai
 from google.genai import types
 import matplotlib.pyplot as plt
+from matplotlib.patches import Arc as MplArc
 import numpy as np
 from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
@@ -20,87 +22,7 @@ import streamlit as st
 
 
 # ==============================================================================
-# 0. HÀM NẮN PHẲNG ẢNH NGHIÊNG BẰNG OPENCV (PERSPECTIVE TRANSFORM)
-# ==============================================================================
-def order_points(pts):
-  """Sắp xếp 4 góc theo thứ tự: Top-Left, Top-Right, Bottom-Right, Bottom-Left"""
-  rect = np.zeros((4, 2), dtype="float32")
-  s = pts.sum(axis=1)
-  rect[0] = pts[np.argmin(s)]  # Top-Left
-  rect[2] = pts[np.argmax(s)]  # Bottom-Right
-
-  diff = np.diff(pts, axis=1)
-  rect[1] = pts[np.argmin(diff)]  # Top-Right
-  rect[3] = pts[np.argmax(diff)]  # Bottom-Left
-  return rect
-
-
-def correct_perspective_distortion(pil_image):
-  """Tự động tìm khung tờ giấy/bản vẽ và nắn phẳng về góc nhìn trực diện 90 độ"""
-  try:
-    # Chuyển từ PIL Image sang OpenCV BGR
-    img_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-    orig = img_cv.copy()
-
-    # Tiền xử lý: Chuyển ảnh xám, làm mờ, Canny Edge Detection
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, 50, 200)
-
-    # Tìm đường viền (Contours)
-    cnts, _ = cv2.findContours(
-        edged.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
-    )
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]
-
-    screen_cnt = None
-    for c in cnts:
-      peri = cv2.arcLength(c, True)
-      approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-      # Nếu contour có 4 đỉnh thì khả năng cao là tờ giấy
-      if len(approx) == 4:
-        screen_cnt = approx
-        break
-
-    if screen_cnt is not None:
-      pts = screen_cnt.reshape(4, 2)
-      rect = order_points(pts)
-      (tl, tr, br, bl) = rect
-
-      # Tính chiều rộng và chiều cao tối đa của ảnh mới
-      width_A = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-      width_B = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-      max_width = max(int(width_A), int(width_B))
-
-      height_A = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-      height_B = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-      max_height = max(int(height_A), int(height_B))
-
-      dst = np.array(
-          [
-              [0, 0],
-              [max_width - 1, 0],
-              [max_width - 1, max_height - 1],
-              [0, max_height - 1],
-          ],
-          dtype="float32",
-      )
-
-      # Ma trận biến đổi và Nắn phẳng
-      M = cv2.getPerspectiveTransform(rect, dst)
-      warped = cv2.warpPerspective(orig, M, (max_width, max_height))
-
-      # Chuyển ngược lại về PIL Image
-      warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-      return Image.fromarray(warped_rgb), True
-  except Exception as e:
-    pass
-
-  return pil_image, False
-
-
-# ==============================================================================
-# 1. GEMINI SCHEMA
+# 1. ENHANCED GEMINI SCHEMA (BỔ SUNG CHÚ THÍCH VÀ TRÍCH XUẤT KÍCH THƯỚC CHI TIẾT)
 # ==============================================================================
 class ParametricShapeModel(BaseModel):
   name: str = Field(default="shape", description="Tên đối tượng hình học")
@@ -156,7 +78,7 @@ class GeminiResponseModel(BaseModel):
 
 
 # ==============================================================================
-# 2. SHAPE ENGINE
+# 2. SHAPE ENGINE: TRÍCH XUẤT HÌNH HỌC VÀ TÍNH KÍCH THƯỚC CẠNH
 # ==============================================================================
 class ShapeEngine:
 
@@ -184,7 +106,7 @@ class ShapeEngine:
       x = cx + radius * math.cos(rad)
       y = cy + radius * math.sin(rad)
       pts.append((round(x, 4), round(y, 4)))
-    pts.append(pts[0])
+    pts.append(pts[0])  # Khép kín
     return pts
 
   @classmethod
@@ -351,7 +273,7 @@ class ShapeEngine:
 
 
 # ==============================================================================
-# 3. GEMINI PARSER CÓ TIỀN XỬ LÝ NẮN PHẲNG OPENCV
+# 3. GEMINI PARSER NÂNG CẤP ĐỌC KÍCH THƯỚC TRÊN ẢNH
 # ==============================================================================
 def parse_image_with_gemini_ai(image_bytes, api_key, filename):
   if not api_key:
@@ -359,23 +281,18 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
     return []
 
   client = genai.Client(api_key=api_key)
-
-  # Đọc ảnh gốc bằng PIL
-  raw_img = Image.open(io.BytesIO(image_bytes))
-
-  # Tiền xử lý: Tự động nắn phẳng ảnh nếu bị chụp nghiêng
-  img_corrected, is_unwarped = correct_perspective_distortion(raw_img)
-  if is_unwarped:
-    st.info(f"✨ Đã tự động nắn phẳng góc chụp nghiêng cho ảnh `{filename}`!")
+  img = Image.open(io.BytesIO(image_bytes))
 
   prompt = """
-    Bạn là một chuyên gia OCR và Kỹ sư CAD/CAM hàng đầu.
+    Bạn là một chuyên gia OCR và Kỹ sư CAM/CAD hàng đầu.
     Nhiệm vụ của bạn là phân tích ảnh vẽ tay hoặc phác thảo cơ khí trên giấy:
-    1. ƯU TIÊN HÀNG ĐẦU: Đọc tất cả các chữ số kích thước (dimensions) được ghi chú trên tờ giấy (ví dụ: 100mm, 50mm, R20, Ø30,...). 
-    2. Nếu BỨC ẢNH BỊ CHỤP NGHIÊNG/MÉO: Hãy bỏ qua biến dạng góc nhìn trực quan. Khôi phục lại dạng hình học gốc lý tưởng dựa trên các đường nét đối xứng và thông số kích thước OCR đọc được.
-    3. Xác định loại hình vật thể: "RECTANGLE" (Hình chữ nhật), "CIRCLE" (Hình tròn), "REGULAR_POLYGON" (Đa giác đều), "ARC" (Cung tròn), hoặc "POLYGON" (Đa giác tự do).
-    4. Nếu là RECTANGLE: Đọc chiều rộng (width) và chiều cao (height) từ các thông số ghi trên giấy.
-    5. Xuất ra chú thích rõ ràng tiếng Việt trong trường description_vi theo mẫu: "Hình sau xử lý là [Tên hình] ([kích thước])".
+    1. QUAN TRỌNG NHẤT: Đọc tất cả các chữ số kích thước (dimensions) được ghi chú trên tờ giấy (ví dụ: 100mm, 50mm, R20, Ø30,...).
+    2. Xác định chính xác loại hình vật thể: "RECTANGLE" (Hình chữ nhật), "CIRCLE" (Hình tròn), "REGULAR_POLYGON" (Đa giác đều), "ARC" (Cung tròn), hoặc "POLYGON" (Hình đa giác tự do).
+    3. Nếu là RECTANGLE: Đọc chiều rộng (width) và chiều cao (height) từ các thông số ghi trên giấy. Đặt origin=[0,0].
+    4. Cung cấp câu chú thích rõ ràng tiếng Việt trong trường `description_vi` theo mẫu: "Hình sau xử lý là [Tên hình] ([kích thước])". 
+       Ví dụ: "Hình sau xử lý là hình chữ nhật (100mm x 50mm)" hoặc "Hình sau xử lý là hình tròn (Bán kính 30mm)".
+
+    Hãy xuất ra định dạng JSON tuân thủ hoàn toàn theo schema dưới đây.
     """
 
   candidate_models = [
@@ -390,7 +307,7 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
       try:
         response = client.models.generate_content(
             model=model_name,
-            contents=[img_corrected, prompt],
+            contents=[img, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=GeminiResponseModel,
@@ -419,7 +336,12 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
             or "UNAVAILABLE" in err_msg
             or "high demand" in err_msg
         ):
-          time.sleep((attempt + 1) * 2)
+          wait_time = (attempt + 1) * 2
+          st.warning(
+              f"⚠️ Model {model_name} quá tải. Thử lại"
+              f" {attempt + 1}/{max_retries_per_model}..."
+          )
+          time.sleep(wait_time)
         else:
           st.error(f"❌ Lỗi xử lý ảnh ({filename}): {e}")
           return []
@@ -429,12 +351,13 @@ def parse_image_with_gemini_ai(image_bytes, api_key, filename):
 
 
 # ==============================================================================
-# 3.1. PARSE DXF (EZDXF)
+# 3.1. ĐỌC DXF CHUYÊN NGHIỆP (TỰ ĐỘNG GIẢI MÃ BINARY/ASCII & EXPLODE BLOCK)
 # ==============================================================================
 def parse_dxf_with_ezdxf(file_upload, filename):
   shapes = []
   tmp_path = None
   try:
+    # Ghi dữ liệu ra file tạm thời để ezdxf tự phát hiện cấu trúc ASCII hoặc Binary DXF
     with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
       tmp_file.write(file_upload.getvalue())
       tmp_path = tmp_file.name
@@ -442,12 +365,17 @@ def parse_dxf_with_ezdxf(file_upload, filename):
     doc = ezdxf.readfile(tmp_path)
   except Exception as ex:
     st.error(f"Lỗi đọc DXF ({filename}): {ex}")
+    if tmp_path and os.path.exists(tmp_path):
+      os.remove(tmp_path)
     return []
+
   finally:
     if tmp_path and os.path.exists(tmp_path):
       os.remove(tmp_path)
 
   msp = doc.modelspace()
+
+  # Lấy danh sách các đối tượng (Tự động rã Block/INSERT ra thành các nét vẽ đơn)
   entities = []
   for e in msp:
     if e.dxftype() == "INSERT":
@@ -544,7 +472,7 @@ def parse_dxf_with_ezdxf(file_upload, filename):
 
 
 # ==============================================================================
-# 4. HẬU KỲ: WORK ZERO, TOOLPATH & SAFETY
+# 4. HẬU KỲ: WORK ZERO, OFFSET, POCKET, SAFETY & OPTIMIZATION
 # ==============================================================================
 def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
   offset_x, offset_y = 0.0, 0.0
@@ -572,6 +500,7 @@ def apply_work_zero_offset(shapes, bed_w, bed_h, work_zero):
       ex, ey = shape["end_p"]
       ns["start_p"] = (sx + offset_x, sy + offset_y)
       ns["end_p"] = (ex + offset_x, ey + offset_y)
+
     transformed.append(ns)
   return transformed
 
@@ -615,12 +544,15 @@ def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
 
   paths = []
   current_poly = poly.buffer(-tool_dia / 2.0)
+
+  max_loops = 500
   loop_count = 0
 
-  while not current_poly.is_empty and loop_count < 500:
+  while not current_poly.is_empty and loop_count < max_loops:
     loop_count += 1
     if current_poly.area < 0.01:
       break
+
     if isinstance(current_poly, Polygon):
       paths.append(list(current_poly.exterior.coords))
       current_poly = current_poly.buffer(-step)
@@ -638,6 +570,7 @@ def generate_pocket_toolpaths(pts, tool_dia, stepover_ratio=0.6):
 def check_safety_and_collisions(shapes, bed_w, bed_h):
   warnings = []
   polygons = []
+
   for s in shapes:
     pts = []
     if "points" in s:
@@ -833,12 +766,10 @@ def build_full_gcode(
 
 
 # ==============================================================================
-# 6. GIAO DIỆN STREAMLIT
+# 6. GIAO DIỆN STREAMLIT & PREVIEW HIỂN THỊ CHÚ THÍCH + KÍCH THƯỚC CẠNH
 # ==============================================================================
 st.set_page_config(page_title="CAM Studio Pro v5", layout="wide")
-st.title(
-    "⚙️ Parametric CAM Studio - OpenCV Unwarp & Visual Dimensions Engine"
-)
+st.title("⚙️ Parametric CAM Studio - Visual Dimensions & OCR Processing Engine")
 
 if "loaded_shapes" not in st.session_state:
   st.session_state["loaded_shapes"] = []
@@ -919,7 +850,7 @@ input_type = st.radio(
     "Chọn định dạng đầu vào:",
     [
         "DXF (ezdxf)",
-        "IMAGE/SKETCH (OpenCV Perspective Dewarp & Gemini OCR)",
+        "IMAGE/SKETCH (Gemini AI Validation & Dimension Reading)",
     ],
     horizontal=True,
 )
@@ -947,15 +878,14 @@ else:
       accept_multiple_files=True,
   )
   if uploaded_imgs and st.button(
-      "🤖 Nắn Phẳng OpenCV & Phân Tích Gemini AI"
+      "🤖 Phân Tích Gemini AI & Validated Shape Engine"
   ):
     if not api_key:
       st.error("Vui lòng nhập Gemini API Key ở Sidebar!")
     else:
       shapes = []
       with st.spinner(
-          "Đang tự động nắn phẳng góc nghiêng & OCR trích xuất kích"
-          " thước..."
+          "Gemini AI đang đọc thông số ghi chú & trích xuất hình học..."
       ):
         for img in uploaded_imgs:
           shapes.extend(
@@ -1000,7 +930,7 @@ with col_left:
       st.divider()
 
 with col_right:
-  st.subheader("3. 👁️ Dashboard Preview CAD")
+  st.subheader("3. 👁️ Dashboard Preview CAD (Có Chú Thích & Kích Thước Cạnh)")
   transformed_shapes = apply_work_zero_offset(
       st.session_state["loaded_shapes"], bed_width, bed_height, work_zero_pos
   )
@@ -1020,6 +950,7 @@ with col_right:
   ax.axhline(0, color="red", linewidth=1)
   ax.axvline(0, color="red", linewidth=1)
 
+  # VẼ VẬT THỂ & CHÚ THÍCH KÍCH THƯỚC TRỰC QUAN
   for s in transformed_shapes:
     desc_text = s.get("description", "")
 
@@ -1027,6 +958,7 @@ with col_right:
       pts = np.array(s["points"])
       ax.plot(pts[:, 0], pts[:, 1], "b-", linewidth=2)
 
+      # Tính và vẽ kích thước từng cạnh
       num_pts = len(pts)
       for i in range(num_pts - 1):
         p1, p2 = pts[i], pts[i + 1]
@@ -1034,6 +966,7 @@ with col_right:
         mid_x = (p1[0] + p2[0]) / 2.0
         mid_y = (p1[1] + p2[1]) / 2.0
 
+        # Hiển thị độ dài cạnh bằng nhãn
         if length > 0.1:
           ax.text(
               mid_x,
@@ -1047,6 +980,7 @@ with col_right:
               ),
           )
 
+      # Chú thích Tên / Loại hình ở trọng tâm
       cx = np.mean(pts[:, 0])
       cy = np.mean(pts[:, 1])
       ax.text(
@@ -1070,6 +1004,8 @@ with col_right:
       r = s["radius"]
       circle = plt.Circle((cx, cy), r, color="g", fill=False, linewidth=2)
       ax.add_patch(circle)
+
+      # Vẽ chú thích Bán kính & Chú thích hình
       ax.plot([cx, cx + r], [cy, cy], "g--")
       ax.text(
           cx + r / 2,
@@ -1095,27 +1031,53 @@ with col_right:
           ),
       )
 
-  ax.set_xlim(-50, bed_width + 50)
-  ax.set_ylim(-50, bed_height + 50)
+    elif s["type"] == "ARC":
+      cx, cy = s["center"]
+      r = s.get("radius", 10.0)
+      sa = s.get("start_angle", 0.0)
+      ea = s.get("end_angle", 90.0)
+
+      arc_patch = MplArc(
+          (cx, cy),
+          r * 2,
+          r * 2,
+          angle=0,
+          theta1=sa,
+          theta2=ea,
+          color="magenta",
+          linewidth=2,
+      )
+      ax.add_patch(arc_patch)
+      ax.text(
+          cx,
+          cy,
+          f"📝 {desc_text} (R={r:.1f}mm)",
+          color="magenta",
+          fontweight="bold",
+          fontsize=8,
+      )
+
   st.pyplot(fig)
 
-  if transformed_shapes:
-    st.divider()
-    gcode_text = build_full_gcode(
-        transformed_shapes,
-        wcs_option,
-        spindle_speed,
-        tool_diameter,
-        feed_rate,
-        plunge_rate,
-        target_depth,
-        step_down,
-        arc_mode,
-        lead_in_option,
-    )
-    st.download_button(
-        "📥 Tải File G-code (.nc / .gcode)",
-        data=gcode_text,
-        file_name="output_cnc.nc",
-        mime="text/plain",
-    )
+# SECTION 3: EXPORT ISO G-CODE
+st.divider()
+st.subheader("4. 🚀 Xuất G-Code ISO")
+if st.session_state["loaded_shapes"]:
+  gcode_text = build_full_gcode(
+      transformed_shapes,
+      wcs_option,
+      spindle_speed,
+      tool_diameter,
+      feed_rate,
+      plunge_rate,
+      target_depth,
+      step_down,
+      arc_mode,
+      lead_in_option,
+  )
+  st.download_button(
+      "💾 Tải File ISO G-Code (.nc)",
+      data=gcode_text,
+      file_name="OUTPUT_PROGRAM.nc",
+      mime="text/plain",
+  )
